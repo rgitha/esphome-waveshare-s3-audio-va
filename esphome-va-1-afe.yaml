@@ -103,6 +103,10 @@
 #   repository (sounds/), via the sounds_url substitution.
 # - Full ring again (2026.11.12.12): "solid" (listening) and the mute flash
 #   now clear the running effect; they were drawn through Pilot on one LED.
+# - Sendspin (2026.11.12.13): synchronized multi-room audio, as on Voice PE.
+#   Media player is now speaker_source with media sources (audio files, HTTP,
+#   Sendspin); sounds moved to audio_file and play_sound takes the file id.
+#   Sendspin delay is adjustable from the server (ES8311 DAC delay unknown).
 # - Pilot light (2026.11.12.7): when idle, one LED (pilot_led) shows dim white
 #   = on and ready, dim red = microphone muted. After the mute flash the ring
 #   returns to the pilot instead of going dark.
@@ -146,7 +150,7 @@
 # - rgb_order -> channel_colors (deprecated, removed in 2027.3).
 #
 # Cleanup / platform
-# - play_sound takes a const AudioFile* (ESPHome 2026.10).
+# - play_sound takes the audio_file id as a string (since Sendspin, 2026.11.12.13).
 # - min_version 2026.8.0 (channel_colors).
 # - OTA uses encryption (API key) instead of a password.
 # - Removed debug:, Current device time sensor + publish_current_time script.
@@ -160,7 +164,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.12.12"
+  fw_version: "2026.11.12.13"
 
   # Phases of the Voice Assistant
   voice_assist_idle_phase_id: '1' # ready to be triggered by a wake word
@@ -594,8 +598,45 @@ speaker:
     id: media_resampling_speaker
     output_speaker: media_mixing_input
 
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: false
+
+audio_file:
+  - id: mute_switch_on_sound
+    file: ${mute_sound_file}
+  - id: mute_switch_off_sound
+    file: ${unmute_sound_file}
+  - id: boot_sound
+    file: ${boot_sound_file}
+  - id: timer_finished_sound
+    file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+  - id: wake_word_triggered_sound
+    file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+  - id: error_cloud_expired
+    file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
+
+media_source:
+  - platform: audio_file
+    id: audio_file_announcement_source
+  - platform: audio_http
+    id: http_announcement_source
+    buffer_size: 250000
+  - platform: audio_http
+    id: http_media_source
+    buffer_size: 500000
+  - platform: sendspin
+    id: sendspin_media_source
+    codecs: [FLAC, PCM]  # Prefer FLAC for Sendspin
+    # DAC delay for sync: unknown for the ES8311 behind the audio stack (Voice PE: 480 us).
+    # Adjustable lets the Sendspin server (Music Assistant) set and keep a per-player delay.
+    static_delay_adjustable: true
+
 media_player:
-  - platform: speaker
+  # Sendspin group control (volume/mute of the whole group)
+  - platform: sendspin
+    id: sendspin_group_media_player
+  - platform: speaker_source
     id: external_media_player
     name: None
     internal: False
@@ -608,11 +649,17 @@ media_player:
       format: FLAC     # FLAC is the least processor intensive codec
       num_channels: 1  # Stereo audio is unnecessary for announcements
       sample_rate: 48000 # supported by Music Assistant
+      sources:
+        - audio_file_announcement_source
+        - http_announcement_source
     media_pipeline:
       speaker: media_resampling_speaker
       format: FLAC     # FLAC is the least processor intensive codec
       num_channels: 1  # mono hardware, one speaker
       sample_rate: 48000
+      sources:
+        - http_media_source
+        - sendspin_media_source
     on_announcement:
       - mixer_speaker.apply_ducking:
           id: media_mixing_input
@@ -626,7 +673,7 @@ media_player:
             - not:
                 voice_assistant.is_running:
             - not:
-                media_player.is_announcing:
+                media_player.is_announcing: external_media_player
         then:
           - mixer_speaker.apply_ducking:
               id: media_mixing_input
@@ -645,33 +692,6 @@ media_player:
           then:
             - delay: 100ms  # Debounce
             - script.execute: control_leds_volume_changed
-    files:
-      - id: mute_switch_on_sound
-        file: ${mute_sound_file}
-      - id: mute_switch_off_sound
-        file: ${unmute_sound_file}
-      - id: boot_sound
-        file: ${boot_sound_file}
-      - id: timer_finished_sound
-        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
-      - id: wake_word_triggered_sound
-        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
-      - id: error_cloud_expired
-        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
-      # - id: center_button_press_sound
-      #   file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_press.flac
-      # - id: center_button_double_press_sound
-      #   file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_double_press.flac
-      # - id: center_button_triple_press_sound
-      #   file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_triple_press.flac
-      # - id: center_button_long_press_sound
-      #   file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_long_press.flac
-      # - id: factory_reset_initiated_sound
-      #   file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_initiated.mp3
-      # - id: factory_reset_cancelled_sound
-      #   file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_cancelled.mp3
-      # - id: factory_reset_confirmed_sound
-      #   file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_confirmed.mp3
 
 micro_wake_word:
   id: mww
@@ -723,9 +743,10 @@ micro_wake_word:
                     else:
                       - if:
                           condition:
-                            media_player.is_announcing:
+                            media_player.is_announcing: external_media_player
                           then:
                             - media_player.stop:
+                                id: external_media_player
                                 announcement: true
                           # Start the voice assistant and play the wake sound, if enabled
                           else:
@@ -736,7 +757,7 @@ micro_wake_word:
                                   - script.execute:
                                       id: play_sound
                                       priority: true
-                                      sound_file: !lambda return id(wake_word_triggered_sound);
+                                      sound_file: "wake_word_triggered_sound"
                                   - delay: 300ms
                             - voice_assistant.start:
                                 wake_word: !lambda return wake_word;
@@ -779,7 +800,7 @@ voice_assistant:
           - script.execute:
               id: play_sound
               priority: false
-              sound_file: !lambda return id(boot_sound);
+              sound_file: "boot_sound"
     - lambda: id(init_in_progress) = false;
     - micro_wake_word.start:
     - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
@@ -808,7 +829,7 @@ voice_assistant:
           - script.execute:
               id: play_sound
               priority: true
-              sound_file: !lambda return id(error_cloud_expired);
+              sound_file: "error_cloud_expired"
   # When the voice assistant starts: Play a wake up sound, duck audio.
   on_start:
     # A run (wake word, start_va, or a conversation continued after an
@@ -1192,34 +1213,32 @@ script:
       - script.execute:
           id: play_sound
           priority: true
-          sound_file: !lambda return id(timer_finished_sound);
+          sound_file: "timer_finished_sound"
 
   - id: enable_repeat_one
     then:
-      - lambda: |-
-            id(external_media_player)
-              ->make_call()
-              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
-              .set_announcement(true)
-              .perform();
-            id(external_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 500);
+      - media_player.repeat_one:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 500ms
 
   - id: disable_repeat
     then:
-      - lambda: |-
-            id(external_media_player)
-              ->make_call()
-              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
-              .set_announcement(true)
-              .perform();
-            id(external_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      - media_player.repeat_off:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 0ms
 
   - id: play_sound
     parameters:
       priority: bool
-      # const pointer works on ESPHome 2026.10 (const audio files) and older releases.
-      # Spelled with add_const_t because script parameter types may not contain spaces.
-      sound_file: "std::add_const_t<audio::AudioFile>*"
+      sound_file: string  # id of an audio_file entry
     then:
       - lambda: |-
           if (priority) {
@@ -1230,7 +1249,11 @@ script:
               .perform();
           }
           if ((id(external_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING) || priority) {
-            id(external_media_player)->play_file(const_cast<audio::AudioFile *>(sound_file), true, false);
+            id(external_media_player)
+              ->make_call()
+              .set_media_url("audio-file://" + sound_file)
+              .set_announcement(true)
+              .perform();
           }
 
   # Timer helpers
@@ -1289,7 +1312,7 @@ script:
             - micro_wake_word.enable_model: stop
             - wait_until:
                 not:
-                  media_player.is_announcing:
+                  media_player.is_announcing: external_media_player
             - if:
                 condition:
                   switch.is_off: timer_ringing
@@ -1450,7 +1473,7 @@ switch:
             - script.execute:
                 id: play_sound
                 priority: false
-                sound_file: !lambda return id(mute_switch_on_sound);
+                sound_file: "mute_switch_on_sound"
     turn_off_action:
       - lambda: id(mic_is_muted) = false;
       - microphone.unmute: afe_mic
@@ -1466,7 +1489,7 @@ switch:
             - script.execute:
                 id: play_sound
                 priority: false
-                sound_file: !lambda return id(mute_switch_off_sound);
+                sound_file: "mute_switch_off_sound"
 
   - platform: template
     id: mute_sound
@@ -1509,9 +1532,10 @@ switch:
       - script.execute: disable_repeat
       - if:
           condition:
-            media_player.is_announcing:
+            media_player.is_announcing: external_media_player
           then:
             media_player.stop:
+              id: external_media_player
               announcement: true
       - mixer_speaker.apply_ducking:
           id: media_mixing_input
