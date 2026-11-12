@@ -107,6 +107,10 @@
 #   Media player is now speaker_source with media sources (audio files, HTTP,
 #   Sendspin); sounds moved to audio_file and play_sound takes the file id.
 #   Sendspin delay is adjustable from the server (ES8311 DAC delay unknown).
+# - All external files pinned (2026.11.12.14): Voice PE sounds and the stop
+#   model copied into this repository, referenced at a fixed commit (repo_ref);
+#   hey_jarvis and VAD from a fixed commit of micro-wake-word-models; audio
+#   stack by commit (v2026.11.0).
 # - Pilot light (2026.11.12.7): when idle, one LED (pilot_led) shows dim white
 #   = on and ready, dim red = microphone muted. After the mute flash the ring
 #   returns to the pilot instead of going dark.
@@ -164,7 +168,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.12.13"
+  fw_version: "2026.11.12.14"
 
   # Phases of the Voice Assistant
   voice_assist_idle_phase_id: '1' # ready to be triggered by a wake word
@@ -207,8 +211,13 @@ substitutions:
   pilot_led: '0' # pilot light LED (0..6): first LED of the string, opposite the USB connector (6 is its neighbour)
   pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
 
-  # Sounds: chimes from this repository (sounds/, made by make_chimes.py)
-  sounds_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/main/sounds
+  # Files in this repository (sounds/, models/), pinned to a commit. After changing
+  # a sound or model, push it and set repo_ref to that commit.
+  repo_ref: b695c750df15741f3418079e8847e29922ee66ad
+  repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
+  sounds_url: ${repo_url}/sounds
+  # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
+  mww_models_url: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2
   boot_sound_file: ${sounds_url}/boot_chime.flac
   mute_sound_file: ${sounds_url}/mute_chime.flac
   unmute_sound_file: ${sounds_url}/unmute_chime.flac
@@ -442,7 +451,8 @@ light:
           name: "Wipe"
 
 external_components:
-  - source: github://n-IA-hane/esphome-audio-stack@v2026.11.0
+  # v2026.11.0, pinned by commit
+  - source: github://n-IA-hane/esphome-audio-stack@3787f502d19cfd181df92fee2a920857ef71abcf
     components: [esp_audio_stack, esp_afe]
   # v0.2.0 (in development), pinned by commit
   - source: github://rgitha/esphome-adaptive-volume@17194905b02aceaf282dae386c71a6033882c1d5
@@ -610,11 +620,11 @@ audio_file:
   - id: boot_sound
     file: ${boot_sound_file}
   - id: timer_finished_sound
-    file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+    file: ${sounds_url}/timer_finished.flac
   - id: wake_word_triggered_sound
-    file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+    file: ${sounds_url}/wake_word_triggered.flac
   - id: error_cloud_expired
-    file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
+    file: ${sounds_url}/error_cloud_expired.mp3
 
 media_source:
   - platform: audio_file
@@ -710,15 +720,16 @@ micro_wake_word:
       id: okay_nabu
     #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
     #  id: kenobi
-    - model: hey_jarvis
+    - model: ${mww_models_url}/hey_jarvis.json
       id: hey_jarvis
     #- model: hey_mycroft
     #  id: hey_mycroft
-    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+    - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
       id: stop
       internal: true
       probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
   vad:
+    model: ${mww_models_url}/vad.json
     probability_cutoff: 0.2
   on_wake_word_detected:
     # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing
