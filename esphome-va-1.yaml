@@ -111,6 +111,8 @@
 #   model copied into this repository, referenced at a fixed commit (repo_ref);
 #   hey_jarvis and VAD from a fixed commit of micro-wake-word-models; audio
 #   stack by commit (v2026.11.0).
+# - Reply LEDs (2026.11.12.15): the Wipe effect had no colours, so it showed
+#   random ones; now the reply colour (dim red) with a moving dark gap.
 # - Pilot light (2026.11.12.7): when idle, one LED (pilot_led) shows dim white
 #   = on and ready, dim red = microphone muted. After the mute flash the ring
 #   returns to the pilot instead of going dark.
@@ -168,7 +170,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.12.14"
+  fw_version: "2026.11.12.15"
 
   # Phases of the Voice Assistant
   voice_assist_idle_phase_id: '1' # ready to be triggered by a wake word
@@ -447,8 +449,20 @@ light:
           name: "Rainbow Slow"
           speed: 4
           width: 7
+      # Reply: a colour wipe ignores the light's colour (default is random
+      # colours), so the reply colour is set here: 4 lit, 3 dark, moving.
       - addressable_color_wipe:
           name: "Wipe"
+          add_led_interval: 100ms
+          colors:
+            - red: 60%
+              green: 10%
+              blue: 10%
+              num_leds: 4
+            - red: 0%
+              green: 0%
+              blue: 0%
+              num_leds: 3
 
 external_components:
   # v2026.11.0, pinned by commit
@@ -1180,7 +1194,7 @@ script:
               set("Pulse Slow", 0.6, 0.3, 0.1);
               return;
             case ${voice_assist_replying_phase_id}:
-              set("Wipe", 0.6, 0.1, 0.1);
+              set("Wipe", 0.6, 0.1, 0.1);  // colour set in the Wipe effect
               return;
             case ${voice_assist_error_phase_id}:
               set("Pulse Fast", 1.0, 0.0, 0.0);
