@@ -101,6 +101,8 @@
 #   with Voice PE placeholders until the new chimes are online.
 # - Chimes online (2026.11.12.11): boot/mute/unmute now use the chimes in this
 #   repository (sounds/), via the sounds_url substitution.
+# - Full ring again (2026.11.12.12): "solid" (listening) and the mute flash
+#   now clear the running effect; they were drawn through Pilot on one LED.
 # - Pilot light (2026.11.12.7): when idle, one LED (pilot_led) shows dim white
 #   = on and ready, dim red = microphone muted. After the mute flash the ring
 #   returns to the pilot instead of going dark.
@@ -158,7 +160,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.12.11"
+  fw_version: "2026.11.12.12"
 
   # Phases of the Voice Assistant
   voice_assist_idle_phase_id: '1' # ready to be triggered by a wake word
@@ -1047,6 +1049,7 @@ script:
           green: !lambda 'return muted ? 0.0f : 1.0f;'
           blue: 0.0
           brightness: 100%
+          effect: None # full ring (without it the running Pilot effect stays)
       - delay: 250ms
       - script.execute: control_leds # back to the pilot light (red while muted)
 
@@ -1081,6 +1084,7 @@ script:
                       red: !lambda 'return id(led_ring_color_r);'
                       green: !lambda 'return id(led_ring_color_g);'
                       blue: !lambda 'return id(led_ring_color_b);'
+                      effect: None # full ring: clear any running effect (Pilot)
                 else:
                   - light.turn_on:
                       id: status_ring
