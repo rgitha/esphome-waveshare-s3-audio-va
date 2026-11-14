@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.15.4"
+  fw_version: "2026.11.15.5"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -360,8 +360,8 @@ external_components:
   # the n-IA-hane/esp-gmf fork. Pinned by commit.
   - source: github://rgitha/esphome-audio-stack@487db8fd33a41ba2c0b48f8abeb9df5a276c3d68
     components: [esp_audio_stack, esp_afe]
-  # v0.3.0 (in development), pinned by commit
-  - source: github://rgitha/esphome-adaptive-volume@5ab8709398fad4efb7ffee718523bce44b34c6e7
+  # v0.3.1 (in development), pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@2ccab1941c0c5d231973cc154f67e40ddda77820
     components: [adaptive_volume]
 
 # Audio hardware: one shared I2S bus in 4-slot TDM at 48 kHz.

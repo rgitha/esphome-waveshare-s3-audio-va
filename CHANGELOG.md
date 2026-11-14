@@ -4,6 +4,9 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.15
 
+- **.5** adaptive_volume v0.3.1: the first 1 s of idle after boot is skipped by
+  the room-noise estimators (a start-up transient made the first replies too
+  loud for about 5 s).
 - **.4** YAML header shortened; history moved here, design notes to README.md;
   obsolete experiment notes dropped.
 - **.3** Substitutions regrouped: tunables first, then files, then fixed
