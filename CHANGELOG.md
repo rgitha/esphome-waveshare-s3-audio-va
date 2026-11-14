@@ -4,10 +4,13 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.15
 
+- **.7** adaptive_volume v0.3.1: "Echo reduction" diagnostic, reported after
+  each stretch of playback (the log line also gives the mic peak).
 - **.6** adaptive_volume v0.3.0 now also skips the first 1 s of idle after boot
   in the room-noise estimators (a start-up transient made the first replies
-  too loud for about 5 s); v0.3.1 folded into v0.3.0.
-- **.5** (adaptive_volume v0.3.1, folded into v0.3.0 in .6.)
+  too loud for about 5 s); the interim build of .5 folded into v0.3.0.
+- **.5** (interim adaptive_volume build with the start-up skip, folded into
+  v0.3.0 in .6.)
 - **.4** YAML header shortened; history moved here, design notes to README.md;
   obsolete experiment notes dropped.
 - **.3** Substitutions regrouped: tunables first, then files, then fixed
