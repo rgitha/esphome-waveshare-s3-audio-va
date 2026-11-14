@@ -113,6 +113,28 @@
 #   stack by commit (v2026.11.0).
 # - Reply LEDs (2026.11.12.15): the Wipe effect had no colours, so it showed
 #   random ones; now the reply colour (dim red) with a moving dark gap.
+# - Timer countdown (2026.11.12.16): while a timer runs, the ring shows the
+#   time left on the first timer (Timer Tick effect) instead of a slow pulse.
+#   Teal, so it is not confused with the violet/blue listening colours.
+#   Whole LEDs only, interpolated between ticks: full at the start, no flicker.
+# - Timer ringing teal too (2026.11.12.16).
+# - Replying LEDs follow the audio (2026.11.12.16): they start when the media
+#   player starts playing the reply (on_announcement), not when HA announces it
+#   (intent progress / TTS start), which could be seconds earlier.
+# - Reply LEDs and "stop" (2026.11.12.17):
+#   - New phase reply pending (steady red) from hand-over to TTS until the
+#     audio starts, then the red wipe.
+#   - on_end waits for the real end of playback: ESPHome ends the run when
+#     playback has not started within 2 s, which sent the LEDs to idle (and
+#     undid ducking and adaptive volume) while the reply was still to come.
+#   - "Stop" is on from the end of the command until the reply has played
+#     (stop_word_for_reply, replaces activate_stop_word_once), so a reply can
+#     be stopped while thinking or pending too. A "stop" while the reply is
+#     pending cancels it instead of starting a new run.
+# - Backup forks (2026.11.15.1): audio stack from rgitha/esphome-audio-stack
+#   (v2026.11.0 + Espressif GMF AI Audio 1.1.2 from the component registry);
+#   adaptive_volume v0.3.0
+#   (speaker level: median of the last 3 replies).
 # - Pilot light (2026.11.12.7): when idle, one LED (pilot_led) shows dim white
 #   = on and ready, dim red = microphone muted. After the mute flash the ring
 #   returns to the pilot instead of going dark.
@@ -170,7 +192,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.12.15"
+  fw_version: "2026.11.15.1"
 
   # Phases of the Voice Assistant
   voice_assist_idle_phase_id: '1' # ready to be triggered by a wake word
@@ -178,6 +200,7 @@ substitutions:
   voice_assist_listening_for_command_phase_id: '3' # listening for a voice command
   voice_assist_thinking_phase_id: '4' # processing the command
   voice_assist_replying_phase_id: '5' # replying to the command
+  voice_assist_reply_pending_phase_id: '6' # reply handed to TTS, audio not playing yet
   voice_assist_not_ready_phase_id: '10' # not ready
   voice_assist_error_phase_id: '11' # encountered an error
 
@@ -210,7 +233,8 @@ substitutions:
 
   hidden_ssid: "false"
   led_num: '7' # WS2812 ring LEDs
-  pilot_led: '0' # pilot light LED (0..6): first LED of the string, opposite the USB connector (6 is its neighbour)
+  # LED numbering: 0 is almost opposite the USB port; 1..6 follow anticlockwise (seen from the speaker side)
+  pilot_led: '0' # pilot light LED (0..6)
   pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
 
   # Files in this repository (sounds/, models/), pinned to a commit. After changing
@@ -427,6 +451,28 @@ light:
           lambda: |-
             it.all() = Color::BLACK;
             it[${pilot_led}] = current_color * ${pilot_dim};
+      # Timer countdown: of the LEDs, the share still lit is the time left on
+      # the first timer (full at the start, one LED off every 1/7 of it).
+      # Whole LEDs only: with the strip's gamma 2.8 a partly dimmed LED looks
+      # off or flickers. Seconds are interpolated between timer ticks. Pilot
+      # position red while the microphone is muted.
+      - addressable_lambda:
+          name: "Timer Tick"
+          update_interval: 100ms
+          lambda: |-
+            static uint32_t last_left = UINT32_MAX, last_ms = 0;
+            const auto &t = id(first_active_timer);
+            if (t.seconds_left != last_left) {
+              last_left = t.seconds_left;
+              last_ms = millis();
+            }
+            const float total = std::max(t.total_seconds, static_cast<uint32_t>(1));
+            const float left = std::max(t.seconds_left - std::min((millis() - last_ms) / 1000.0f, 1.0f), 0.0f);
+            const int n = ${led_num};
+            const int lit = std::min(n, static_cast<int>(std::ceil(n * left / total - 0.001f)));
+            for (int i = 0; i < n; i++)
+              it[i] = i < lit ? current_color : Color::BLACK;
+            if (id(mic_is_muted)) it[${pilot_led}] = Color(255, 0, 0) * ${pilot_dim};
       - pulse:
           name: "Pulse Slow"
           min_brightness: 30%
@@ -449,6 +495,11 @@ light:
           name: "Rainbow Slow"
           speed: 4
           width: 7
+      # Reply pending: the reply colour, steady (same level as the Wipe colours)
+      - addressable_lambda:
+          name: "Reply Pending"
+          update_interval: 1s
+          lambda: it.all() = Color(153, 26, 26);
       # Reply: a colour wipe ignores the light's colour (default is random
       # colours), so the reply colour is set here: 4 lit, 3 dark, moving.
       - addressable_color_wipe:
@@ -465,11 +516,13 @@ light:
               num_leds: 3
 
 external_components:
-  # v2026.11.0, pinned by commit
-  - source: github://n-IA-hane/esphome-audio-stack@3787f502d19cfd181df92fee2a920857ef71abcf
+  # Backup fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus one commit that
+  # takes Espressif's GMF AI Audio 1.1.2 from the component registry instead of
+  # the n-IA-hane/esp-gmf fork. Pinned by commit.
+  - source: github://rgitha/esphome-audio-stack@487db8fd33a41ba2c0b48f8abeb9df5a276c3d68
     components: [esp_audio_stack, esp_afe]
-  # v0.2.0 (in development), pinned by commit
-  - source: github://rgitha/esphome-adaptive-volume@17194905b02aceaf282dae386c71a6033882c1d5
+  # v0.3.0 (in development), pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@5ab8709398fad4efb7ffee718523bce44b34c6e7
     components: [adaptive_volume]
 
 # Audio hardware: one shared I2S bus in 4-slot TDM at 48 kHz.
@@ -689,6 +742,15 @@ media_player:
           id: media_mixing_input
           decibel_reduction: 10
           duration: 0.0s
+      # The TTS reply has started playing: replying LEDs now
+      - if:
+          condition:
+            lambda: return id(reply_pending);
+          then:
+            - lambda: |-
+                id(reply_pending) = false;
+                id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+            - script.execute: control_leds
     on_state:
       if:
         condition:
@@ -764,12 +826,16 @@ micro_wake_word:
                       voice_assistant.is_running:
                     then:
                       voice_assistant.stop:
-                    # Stop any other media player announcement
+                    # Stop any other media player announcement, or a reply still on its way
+                    # (the run can end before its audio starts)
                     else:
                       - if:
                           condition:
-                            media_player.is_announcing: external_media_player
+                            or:
+                              - media_player.is_announcing: external_media_player
+                              - lambda: return id(reply_pending);
                           then:
+                            - lambda: id(reply_pending) = false;
                             - media_player.stop:
                                 id: external_media_player
                                 announcement: true
@@ -875,16 +941,19 @@ voice_assistant:
   on_stt_vad_end:
     - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
     - script.execute: control_leds
+    # "Stop" from the end of the command until the reply has played
+    - script.execute: stop_word_for_reply
   on_intent_progress:
     - if:
         condition:
           # A nonempty x variable means a streaming TTS url was sent to the media player
           lambda: 'return !x.empty();'
         then:
-          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          # Steady red now; the wipe starts with the audio (media player on_announcement)
+          - lambda: |-
+              id(reply_pending) = true;
+              id(voice_assistant_phase) = ${voice_assist_reply_pending_phase_id};
           - script.execute: control_leds
-          # Start a script that would potentially enable the stop word if the response is longer than a second
-          - script.execute: activate_stop_word_once
   on_tts_start:
     # TTS without a run = HA announcement (assist_satellite.announce): output
     # offset until on_end, plus the urgent offset if set_announcement_offset
@@ -899,12 +968,19 @@ voice_assistant:
     - if:
         condition:
           # The intent_progress trigger didn't start the TTS response
-          lambda: 'return id(voice_assistant_phase) != ${voice_assist_replying_phase_id};'
+          lambda: 'return !id(reply_pending) && id(voice_assistant_phase) != ${voice_assist_replying_phase_id};'
         then:
-          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          # Steady red now; the wipe starts with the audio (media player on_announcement)
+          - lambda: |-
+              id(reply_pending) = true;
+              id(voice_assistant_phase) = ${voice_assist_reply_pending_phase_id};
           - script.execute: control_leds
-          # Start a script that would potentially enable the stop word if the response is longer than a second
-          - script.execute: activate_stop_word_once
+          # HA announcement (no voice command before it): "stop" for it too
+          - if:
+              condition:
+                lambda: return !id(va_run_active);
+              then:
+                - script.execute: stop_word_for_reply
   on_tts_end:
     - script.execute:
         id: send_tts_uri_event
@@ -919,23 +995,42 @@ voice_assistant:
     - wait_until:
         not:
           voice_assistant.is_running:
-    # Stop ducking audio.
-    - mixer_speaker.apply_ducking:
-        id: media_mixing_input
-        decibel_reduction: 0
-        duration: 1.0s
-    # If the end happened because of an error, let the error phase on for a second
+    # The reply may still be pending or playing: ESPHome ends the run when
+    # playback has not started within 2 s, though it starts later. Wait for the
+    # real end of playback (not after an error).
     - if:
         condition:
-          lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+          lambda: return id(voice_assistant_phase) != ${voice_assist_error_phase_id};
         then:
-          - delay: 1s
-    # Reset the voice assistant phase id and reset the LED animations.
-    - lambda: |-
-        id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
-        id(va_run_active) = false;
-        id(adaptive).set_announcement_offset(0);  // announcement finished
-    - script.execute: control_leds
+          - wait_until:
+              condition:
+                lambda: |-
+                  return !id(reply_pending) &&
+                         id(external_media_player).state != media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+              timeout: 30s
+    # Unless a new run started meanwhile (it owns the phase and LEDs):
+    # stop ducking and go back to idle
+    - if:
+        condition:
+          not:
+            voice_assistant.is_running:
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+          # If the end happened because of an error, let the error phase on for a second
+          - if:
+              condition:
+                lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+              then:
+                - delay: 1s
+          - lambda: |-
+              id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+              id(reply_pending) = false;
+              id(va_run_active) = false;
+              id(adaptive).set_announcement_offset(0);  // announcement finished
+          - script.execute: control_leds
   on_timer_finished:
     - switch.turn_on: timer_ringing
     - lambda: |
@@ -1037,6 +1132,10 @@ globals:
     type: float
     restore_value: yes
     initial_value: '0.8'
+  - id: reply_pending # TTS reply announced by HA, audio not playing yet
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   - id: va_run_active # a voice assistant run (wake word / start_va) is in progress
     type: bool
     restore_value: no
@@ -1178,7 +1277,7 @@ script:
             return;
           }
           if (ringing) {                             // Timer ringing
-            set("Pulse Fast", 0.6, 0.0, 0.6);
+            set("Pulse Fast", 0.0, 0.6, 0.6);        // teal, like the countdown
             return;
           }
 
@@ -1193,6 +1292,9 @@ script:
             case ${voice_assist_thinking_phase_id}:
               set("Pulse Slow", 0.6, 0.3, 0.1);
               return;
+            case ${voice_assist_reply_pending_phase_id}:
+              set("Reply Pending", 0.6, 0.1, 0.1);  // steady red until the audio starts
+              return;
             case ${voice_assist_replying_phase_id}:
               set("Wipe", 0.6, 0.1, 0.1);  // colour set in the Wipe effect
               return;
@@ -1205,9 +1307,10 @@ script:
             default: break;
           }
 
-          // Timers ticking (no bar, minimal footprint)
+          // Timers ticking: countdown of the first timer on the ring
           if (timers_active) {
-            set("Pulse Slow", 0.6, 0.0, 0.8);
+            id(fetch_first_active_timer).execute();
+            set("Timer Tick", 0.0, 0.6, 0.6);  // teal: apart from the violet/blue voice states
             return;
           }
 
@@ -1319,25 +1422,32 @@ script:
           id(is_timer_active) = output;
 
   # Enable/disable the "stop" wake word around long TTS
-  - id: activate_stop_word_once
+  # "Stop" for a reply: on at the end of the command (a "stop" ending the
+  # command is not caught: the freshly enabled model has no history), off once the reply has played, the run
+  # ended without one, or a follow-up command is being listened to. Restarted
+  # by each command and each HA announcement.
+  - id: stop_word_for_reply
+    mode: restart
     then:
-      # Wait for the reply to actually start playing: a streamed TTS reply can
-      # start more than 1 s later, and "not announcing" below would then switch
-      # "stop" off before the reply begins (Voice PE fix #512).
-      - wait_until:
-          condition:
-            media_player.is_announcing:
-              id: external_media_player
-          timeout: 5s
-      - delay: 1s
       - if:
           condition:
-            switch.is_off: timer_ringing
+            lambda: |-
+              const int p = id(voice_assistant_phase);
+              return p == ${voice_assist_thinking_phase_id} || p == ${voice_assist_reply_pending_phase_id} ||
+                     p == ${voice_assist_replying_phase_id};
           then:
-            - micro_wake_word.enable_model: stop
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.enable_model: stop
             - wait_until:
-                not:
-                  media_player.is_announcing: external_media_player
+                condition:
+                  lambda: |-
+                    const int p = id(voice_assistant_phase);
+                    return p != ${voice_assist_thinking_phase_id} && p != ${voice_assist_reply_pending_phase_id} &&
+                           p != ${voice_assist_replying_phase_id};
+                timeout: 60s
             - if:
                 condition:
                   switch.is_off: timer_ringing
