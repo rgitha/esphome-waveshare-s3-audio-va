@@ -1,190 +1,14 @@
 # ==============================================================================
 # Home Assistant voice satellite for the Waveshare ESP32-S3-AUDIO-Board.
 # Based on github.com/sw3Dan/waveshare-s2-audio_esphome_voice.
-# ==============================================================================
+# Repository: github.com/rgitha/esphome-waveshare-s3-audio-va
 #
-# CHANGELOG (2026-10-23)
-# - Bugfixes, enhancements and dual mic feature - after extensive research - assisted by Claude
-#
-# Dual-mic AFE
-# - Audio path moved to esphome-audio-stack (esp_audio_stack + esp_afe, pinned
-#   v2026.11.0): 48 kHz 4-slot TDM, both mics + speaker reference -> Espressif AFE
-#   (echo cancellation + dual-mic BSS) -> one clean 16 kHz mic for wake word / VA.
-#   Rationale: barge-in ("stop", wake word during playback) and two-mic enhancement.
-# - Replaces i2s_audio, es7210/es8311 components and the i2s mic/speaker platforms;
-#   mixer, resamplers, media player, micro_wake_word and voice_assistant unchanged.
-# - Slot map (verified by the intercom author): 0 = right mic, 2 = left mic,
-#   1 = speaker reference, 3 = unused.
-# - ES7210 gain fixed in YAML (21 dB; AFE output came out quieter at 15 dB);
-#   runtime slider is now a post-AFE digital trim, 0..+18 dB.
-# - mww/VA mic channel selection removed: AFE output is mono.
-# - Settings follow the board-tested intercom profile (high_perf, AGC off), but
-#   type sr instead of fd: fd's nonlinear processing lowered STT accuracy.
-# - stop word cutoff 0.50 -> 0.75: false triggers on residual TTS echo.
-# - Initial volume 85 %, night volume 50 %.
-# - Adaptive volume (switch): the HA volume is the maximum; in a quiet room all
-#   sound is turned down via the codec's master volume (separate gain stage, so
-#   the HA slider never moves). 1 dB less per dB below the full-volume noise
-#   level, capped. Noise is tracked from the raw mic level while nothing plays.
-#   "Adaptive volume reduction" and "Adaptive volume level" show what is applied
-#   (noise-driven updates reported at most every 10 s; 2 dB hysteresis).
-# - Noise estimator: 0.5 s block peaks -> min(3rd-highest of 16 blocks, max of
-#   last 9 blocks) -> exponential (6 s rise, fast fall). Rejects isolated
-#   sounds (< ~1 s) and pairs of bangs, treats bursts recurring within ~2.7 s
-#   as noise, ~1.5 s onset, ~4.5 s release. Replaces the earlier
-#   Doblinger-style fast-fall/slow-rise tracker. (Was 2nd-highest / 5 s;
-#   changed to make the volume change less often.)
-# - Battery monitoring on GPIO6 (hardware mod: R78 bridged pad 1 -> pad 3, so the
-#   R2/R11 divider reaches GPIO6; camera keeps GPIO1). Voltage + rough level,
-#   reported every 5 min (median of 10 readings). Below 2.5 V (battery switched
-#   off or unplugged) reports "unknown" at once; a reconnected battery is
-#   reported on its first reading.
-# - Second noise measurement: approximately A-weighted level of the processed
-#   stream (HP 200 Hz 2nd order + HP 500 Hz 1st order), same estimator. The raw
-#   mic level is unweighted/full-band and bottoms out around -66 dBFS (DC, rumble,
-#   electrical noise), hiding 25-40 dBA changes. "Ambient noise source" selects
-#   which drives adaptive volume. afe_mic_num substitution: "1" builds a
-#   single-mic, no-BSS front end for comparison (BSS can't be toggled at runtime).
-# - Diagnostic "Diag level 1-4": 5 s averages at raw mics, AFE input, AFE output
-#   and A-weighted, to locate where the readings diverge. Reporting (with the
-#   Ambient noise estimates) every 5 s while "Report ambient noise" is on.
-# - Adaptive volume range: master curve floor -30 -> -40 dB, max reduction
-#   limit 25 -> 35 dB (A-weighted measurement gave ~10-12 dB more dynamic range).
-# - Announcement output offsets over the adapted volume (substitutions, 0 dB
-#   ceiling): HA announcements (assist_satellite.announce) +6 with their
-#   pre-announcement chime; chimes, TTS replies and timers/alarms unchanged.
-#   set_announcement_offset action: the next HA announcement within 10 s gets a
-#   further +6 (urgent).
-# - Diag level 1-4 sensors and the raw mic slot levels removed; new diagnostic
-#   "Speaker level (last reply)" shows each counted reply's measurement.
-# - min_version 2026.10.0 (audio-stack requirement).
-# - Audio stack v2026.10.2 -> v2026.11.0: 2026.10.2 no longer compiles with
-#   current ESPHome (ring_buffer handle_ became a function).
-# - Firmware version (fw_version substitution, esphome project/comment): shown
-#   in HA device info and the ESPHome dashboard.
-# - Speaker calibration rev 3 (2026.11.11.6): no dependence on echo
-#   cancellation (room level from the AFE input before the wake word); each
-#   detected reply sets S directly; attenuation A = clamp(S - N_A - C, 0, 30)
-#   with C = 20 dB plus the new "Adaptive volume offset" (-6..+6 dB). S starts
-#   at speaker_level_nominal_db (-35). Removed: full-level -55 substitution,
-#   first-calibration reference, idle in/out ratio, separation guard.
-# - Calibration on short replies (2026.11.11.7): 250 ms skipped at the start
-#   (was 1 s, only needed for the echo canceller), 0.75 s minimum (was 2 s),
-#   so replies of about 1 s and longer are measured.
-# - Calibration timing and averaging (2026.11.12.1): snapshots counted from
-#   550 ms after ANNOUNCING (the AFE input level is a ~30 ms snapshot every
-#   ~256 ms; sound starts ~170 ms after ANNOUNCING); minimum 2 snapshots;
-#   S = power mean of the last up to 3 measured replies, from the first reply on.
-# - Battery median uses an insertion sort (2026.11.12.2): GCC 14 gave a false
-#   array-bounds warning on std::sort.
-# - Adaptive volume moved into an external component, adaptive_volume
-#   (github.com/rgitha/esphome-adaptive-volume v0.1.0, 2026.11.12.3): every sample is
-#   measured through the audio stack's capture interface (no 250 ms snapshots);
-#   same design (flowchart rev 3). The YAML keeps one config block; intervals,
-#   globals, the adaptive script and the A-weighting lambda are gone. "Report
-#   ambient noise" removed: Room noise is now sent at most every 10 s, only
-#   when it changes. Speaker level restarts from the nominal value (new storage).
-# - Adaptive volume component v0.2.0 (2026.11.12.4): reply level from speech
-#   frames only (silence and TTS start-up delay left out), A-weighted like the
-#   room noise; measurements near the room may only lower S; S saved to flash
-#   on a 1 dB change. Nominal speaker level -30.
-# - UI tidy-up (2026.11.12.5): Microphone Mute and Alarm on moved to the
-#   controls; Gain Factor Ch0/Ch1, Mic Gain, Amplifier and Speaker level (last
-#   reply) hidden by default (enable in HA when tuning).
-# - Mute flash: red when the microphone is muted, green when unmuted (was red
-#   for both) (2026.11.12.6).
-# - Stop word for streamed replies (2026.11.12.9): enabling it now waits until
-#   the reply actually plays (Voice PE fix #512). Pilot LED moved to LED 1
-#   (index 0); index 3 sits next to the USB connector.
-# - Boot sound (2026.11.12.10): played once per boot when HA first connects,
-#   skipped in night mode. Sound files are substitutions (boot/mute/unmute),
-#   with Voice PE placeholders until the new chimes are online.
-# - Chimes online (2026.11.12.11): boot/mute/unmute now use the chimes in this
-#   repository (sounds/), via the sounds_url substitution.
-# - Full ring again (2026.11.12.12): "solid" (listening) and the mute flash
-#   now clear the running effect; they were drawn through Pilot on one LED.
-# - Sendspin (2026.11.12.13): synchronized multi-room audio, as on Voice PE.
-#   Media player is now speaker_source with media sources (audio files, HTTP,
-#   Sendspin); sounds moved to audio_file and play_sound takes the file id.
-#   Sendspin delay is adjustable from the server (ES8311 DAC delay unknown).
-# - All external files pinned (2026.11.12.14): Voice PE sounds and the stop
-#   model copied into this repository, referenced at a fixed commit (repo_ref);
-#   hey_jarvis and VAD from a fixed commit of micro-wake-word-models; audio
-#   stack by commit (v2026.11.0).
-# - Reply LEDs (2026.11.12.15): the Wipe effect had no colours, so it showed
-#   random ones; now the reply colour (dim red) with a moving dark gap.
-# - Timer countdown (2026.11.12.16): while a timer runs, the ring shows the
-#   time left on the first timer (Timer Tick effect) instead of a slow pulse.
-#   Teal, so it is not confused with the violet/blue listening colours.
-#   Whole LEDs only, interpolated between ticks: full at the start, no flicker.
-# - Timer ringing teal too (2026.11.12.16).
-# - Replying LEDs follow the audio (2026.11.12.16): they start when the media
-#   player starts playing the reply (on_announcement), not when HA announces it
-#   (intent progress / TTS start), which could be seconds earlier.
-# - Reply LEDs and "stop" (2026.11.12.17):
-#   - New phase reply pending (steady red) from hand-over to TTS until the
-#     audio starts, then the red wipe.
-#   - on_end waits for the real end of playback: ESPHome ends the run when
-#     playback has not started within 2 s, which sent the LEDs to idle (and
-#     undid ducking and adaptive volume) while the reply was still to come.
-#   - "Stop" is on from the end of the command until the reply has played
-#     (stop_word_for_reply, replaces activate_stop_word_once), so a reply can
-#     be stopped while thinking or pending too. A "stop" while the reply is
-#     pending cancels it instead of starting a new run.
-# - Backup forks (2026.11.15.1): audio stack from rgitha/esphome-audio-stack
-#   (v2026.11.0 + Espressif GMF AI Audio 1.1.2 from the component registry);
-#   adaptive_volume v0.3.0
-#   (speaker level: median of the last 3 replies).
-# - Pilot light (2026.11.12.7): when idle, one LED (pilot_led) shows dim white
-#   = on and ready, dim red = microphone muted. After the mute flash the ring
-#   returns to the pilot instead of going dark.
-# - Night mode controls the LEDs only (2026.11.12.8): "Night volume" removed;
-#   the volume cap stacked with adaptive volume and disturbed its calibration.
-# - Adaptive volume self-calibration (2026.11.11.1): the device measures its own
-#   speech level at the mics (S) on voice replies. Echo cancellation separates
-#   speaker from room (AFE input - AFE output), and the full-volume noise level
-#   follows S. A reply that cannot be detected gives an upper limit for S, so a
-#   too-high S always corrects itself. Needs "Echo Cancellation" on.
-# - Adaptive volume UI: noise source fixed to the A-weighted AFE stream ("Ambient
-#   noise source" select and the raw-mic estimator removed). Full-level noise
-#   and max reduction are substitutions (-55 dBFS, 30 dB), no longer entities.
-#   Sensors: "Room noise" (was "Ambient noise (A-weighted)"), "Speaker level"
-#   (new), "Current volume" (was "Adaptive volume level").
-#
-# Audio / wake word
-# - I2S clock: mic bus is now primary, speaker secondary (was ES8311 master).
-#   Mic was mis-clocked until first playback -> micro_wake_word ring-buffer spam.
-# - ES8311: stock ESPHome driver; custom external component (unpinned main) removed.
-# - Removed use_apll / mclk_multiple / force_master; mic 16-bit like the codec.
-# - Mixer + media pipeline mono: board has a single speaker.
-# - ring_buffer_duration: 800ms added, commented out until ESPHome ships it.
-#
-# Gain
-# - Gain factors (mww, VA) 1, reset at boot: digital gain amplifies noise and clips.
-# - noise_suppression_level / auto_gain 0, sliders commented out: HA ignores them
-#   for ESPHome satellites.
-# - Mic gain (ES7210) 15 dB in 3 dB steps; saved value restored at boot.
-#
-# Features
-# - Mic mute uses microphone.mute (0 dB gain was unity, not silence).
-# - Mute-unmute sound switch now plays the mute/unmute sounds.
-# - Play/Pause stops a ringing timer/alarm (works when muted).
-# - Night mode: Night volume / Night LED brightness act as caps; day values
-#   restored on exit. volume_min 0.4 -> 0.1, LED brightness min 0.4 -> 0.2.
-#   volume_max 0.8 -> 1.0 for the audio-stack volume curve.
-#
-# LEDs
-# - Pulse effects: update_interval > transition_length (16 ms flipped constantly).
-# - rgb_order -> channel_colors (deprecated, removed in 2027.3).
-#
-# Cleanup / platform
-# - play_sound takes the audio_file id as a string (since Sendspin, 2026.11.12.13).
-# - min_version 2026.8.0 (channel_colors).
-# - OTA uses encryption (API key) instead of a password.
-# - Removed debug:, Current device time sensor + publish_current_time script.
-# - Removed set_time_zone action, saved_time_zone, setenv/tzset: no effect since
-#   ESPHome 2026.x; device follows HA's time zone.
-# - Substitutions tidied (i2s_din/i2s_dout added, unused ones removed; i2c uses them).
+# - Needs ESPHome 2026.10 or later and a secrets.yaml with wifi_ssid,
+#   wifi_password and api_key_esp32_audio_board.
+# - Tunables are at the top of substitutions; hardware and code constants
+#   at its end.
+# - How it works: README.md (Design notes). Version history: CHANGELOG.md.
+#   On every change: bump fw_version and add a CHANGELOG.md entry.
 # ==============================================================================
 
 substitutions:
@@ -192,17 +16,47 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.15.1"
+  fw_version: "2026.11.15.4"
 
-  # Phases of the Voice Assistant
-  voice_assist_idle_phase_id: '1' # ready to be triggered by a wake word
-  voice_assist_waiting_for_command_phase_id: '2' # waiting for a voice command (after being triggered by the wake word)
-  voice_assist_listening_for_command_phase_id: '3' # listening for a voice command
-  voice_assist_thinking_phase_id: '4' # processing the command
-  voice_assist_replying_phase_id: '5' # replying to the command
-  voice_assist_reply_pending_phase_id: '6' # reply handed to TTS, audio not playing yet
-  voice_assist_not_ready_phase_id: '10' # not ready
-  voice_assist_error_phase_id: '11' # encountered an error
+  # ---- Tunables -------------------------------------------------------------
+
+  # Adaptive volume: attenuation A = clamp(S - room noise - (C + offset), 0, max)
+  loudness_constant_db: "26"  # C: reply this far above the room at full slider; the HA offset adds -6..+6
+  max_attenuation_db: "30"    # largest adaptive reduction
+  # Volume range (each used in two places, so they cannot drift apart)
+  master_volume_min_db: "-40" # codec master volume floor (audio stack and adaptive volume)
+  media_volume_min: "0.1"     # media player volume_min (media player and adaptive volume)
+
+  # Output offsets over the adapted volume for HA announcements (assist_satellite.announce,
+  # including the pre-announcement chime), dB. Applied by lowering the adaptive
+  # reduction, so the ceiling is 0 dB (no effect when the reduction is 0).
+  # Chimes, TTS replies and timers/alarms get no offset.
+  announcement_offset_db: "6"
+  urgent_offset_db: "6"       # extra, for the next announcement after the set_announcement_offset action
+
+  es7210_gain_db: "21.0" # mic ADC gain, fixed at boot; 3 dB steps (intercom profile uses 24)
+  # Front-end mic mode (build time; changing it needs Clean Build Files):
+  #   "2" = both mics, echo cancellation + BSS (normal)
+  #   "1" = right mic only, echo cancellation, no BSS (for comparison tests)
+  afe_mic_num: "2"
+
+  pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
+  hidden_ssid: "false"
+
+  # ---- Files ----------------------------------------------------------------
+
+  # Files in this repository (sounds/, models/), pinned to a commit. After changing
+  # a sound or model, push it and set repo_ref to that commit.
+  repo_ref: b695c750df15741f3418079e8847e29922ee66ad
+  repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
+  sounds_url: ${repo_url}/sounds
+  # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
+  mww_models_url: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2
+  boot_sound_file: ${sounds_url}/boot_chime.flac
+  mute_sound_file: ${sounds_url}/mute_chime.flac
+  unmute_sound_file: ${sounds_url}/unmute_chime.flac
+
+  # ---- Fixed (hardware and code) --------------------------------------------
 
   i2s_mclk: GPIO12
   i2s_bclk: GPIO13  # SCLK
@@ -215,38 +69,23 @@ substitutions:
   i2c_sda: GPIO11
   rtc_int: 5 # TCA9555 pin (RTC interrupt, unused)
 
-  es7210_gain_db: "21.0" # mic ADC gain, fixed at boot; 3 dB steps (intercom profile uses 24)
   # Mic spacing 35 mm centre to centre (needed later for direction of arrival)
-  # Front-end mic mode (build time; changing it needs Clean Build Files):
-  #   "2" = both mics, echo cancellation + BSS (normal)
-  #   "1" = right mic only, echo cancellation, no BSS (for comparison tests)
-  afe_mic_num: "2"
   afe_dual: ${ afe_mic_num == "2" or afe_mic_num == 2 }
   afe_mic_slots: ${ [0, 2] if afe_dual else [0] }
 
-  # Output offsets over the adapted volume for HA announcements (assist_satellite.announce,
-  # including the pre-announcement chime), dB. Applied by lowering the adaptive
-  # reduction, so the ceiling is 0 dB (no effect when the reduction is 0).
-  # Chimes, TTS replies and timers/alarms get no offset.
-  announcement_offset_db: "6"
-  urgent_offset_db: "6"       # extra, for the next announcement after the set_announcement_offset action
-
-  hidden_ssid: "false"
   led_num: '7' # WS2812 ring LEDs
   # LED numbering: 0 is almost opposite the USB port; 1..6 follow anticlockwise (seen from the speaker side)
   pilot_led: '0' # pilot light LED (0..6)
-  pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
 
-  # Files in this repository (sounds/, models/), pinned to a commit. After changing
-  # a sound or model, push it and set repo_ref to that commit.
-  repo_ref: b695c750df15741f3418079e8847e29922ee66ad
-  repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
-  sounds_url: ${repo_url}/sounds
-  # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
-  mww_models_url: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2
-  boot_sound_file: ${sounds_url}/boot_chime.flac
-  mute_sound_file: ${sounds_url}/mute_chime.flac
-  unmute_sound_file: ${sounds_url}/unmute_chime.flac
+  # Phases of the Voice Assistant
+  voice_assist_idle_phase_id: '1' # ready to be triggered by a wake word
+  voice_assist_waiting_for_command_phase_id: '2' # waiting for a voice command (after being triggered by the wake word)
+  voice_assist_listening_for_command_phase_id: '3' # listening for a voice command
+  voice_assist_thinking_phase_id: '4' # processing the command
+  voice_assist_replying_phase_id: '5' # replying to the command
+  voice_assist_reply_pending_phase_id: '6' # reply handed to TTS, audio not playing yet
+  voice_assist_not_ready_phase_id: '10' # not ready
+  voice_assist_error_phase_id: '11' # encountered an error
 
 # Pre-configured camera code
 # exposes UI controls to Homeassistant
@@ -547,7 +386,7 @@ esp_audio_stack:
   buffers_in_psram: true
   # Master volume = ES8311 hardware volume, used only by adaptive volume.
   # -40 dB floor allows up to ~39 dB of adaptive reduction (was -30).
-  master_volume_min_db: -40.0
+  master_volume_min_db: ${master_volume_min_db}
   audio_effects:
     rate_cvt_complexity: 3
     rate_cvt_perf_type: speed
@@ -621,10 +460,10 @@ adaptive_volume:
   blocked: |-
     return id(external_media_player).is_muted() || id(mic_is_muted) || !id(amp_enable_8).state;
   speaker_level_nominal: -30   # S before the first measured reply (this hardware, A-weighted)
-  loudness_constant: 20        # dB above room noise at the mics, at full slider
-  max_attenuation: 30
-  master_volume_min_db: -40    # = esp_audio_stack master_volume_min_db
-  media_volume_min: 0.1        # = media player volume_min
+  loudness_constant: ${loudness_constant_db}
+  max_attenuation: ${max_attenuation_db}
+  master_volume_min_db: ${master_volume_min_db}
+  media_volume_min: ${media_volume_min}
   enable:
     name: Adaptive volume
     entity_category: config
@@ -719,7 +558,7 @@ media_player:
     internal: False
     volume_increment: 0.01
     volume_initial: 0.85 # first boot only; afterwards the last volume is restored
-    volume_min: 0.1 # wider quiet end (was 0.4)
+    volume_min: ${media_volume_min} # wider quiet end (was 0.4)
     volume_max: 1.0 # audio-stack volume curve tops out at 0 dB (stock ES8311 driver reached about +6.5 dB at 0.8)
     announcement_pipeline:
       speaker: announcement_resampling_speaker
