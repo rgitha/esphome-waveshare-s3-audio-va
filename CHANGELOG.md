@@ -2,8 +2,47 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.17
+
+- **.6** adaptive_volume v0.4.2 from main (merged from coherent-s), pinned by commit.
+- **.5** adaptive_volume v0.4.2 (coherent-s): the path analysis runs in the main
+  loop after each reply (the audio core only copies samples), against the wake word
+  buffer overruns during replies; single-lag diagnostic removed; P saved on a 1 dB
+  change and restored as 3 entries; assumed speaker output 46 dB below full scale
+  (measured).
+- **.4** adaptive_volume v0.4.1 (coherent-s): path gain from the cross-spectrum
+  (per frequency, fixed nominal weighting) instead of a single correlation lag,
+  which read about 2 dB low on a darker voice. P restarts from -9 dB.
+- **.3** adaptive_volume v0.4.0 (coherent-s): S = speaker-to-mic path gain
+  (cross-correlation of the speaker reference and the mic) + the analogue gain.
+  C stays 26 (loudness above the room) and assumes the speaker output 45 dB below
+  full scale at the reference (a constant in the component, for any sound); S no
+  longer follows the loudness of what is played. Sensors:
+  Speaker path gain and its per-reply value; Speaker level removed.
+- **.2** "LED gamma compensation" switch removed (compensation always on).
+  Heap free, Heap max block, PSRAM free and ESP temperature disabled by default.
+- **.1** adaptive_volume coherent-s: cross-correlation lag window 0-2 ms (the peak
+  sat at the edge of 0-0.5 ms); a coarse lag profile is logged per reply.
+
 ## 2026.11.16
 
+- **.15** adaptive_volume v0.3.3: diagnostic "Speaker level coherent (last reply)",
+  the reply level from the mic power coherent with the speaker reference (talking
+  and room noise excluded), next to "Speaker level (last reply)" (now enabled).
+  S is unchanged.
+- **.14** adaptive_volume v0.3.2: room noise and
+  echo reduction measured on the AFE output before the Mic Gain trim. With the
+  trim at +18 dB, room noise read 18 dB high (less attenuation, louder replies
+  in a quiet room) and echo reduction 18 dB low.
+- **.13** Mic level: speech was about -50 dBFS at normal distances (STT got very
+  quiet audio). ES7210 gain 24 dB (was 21) and Mic Gain trim default +15 dB (was
+  0): speech about -27 dBFS at arm's length to 2 m, loud close speech peaks about
+  -2 dBFS.
+- **.12** (test) Wake-word pre-roll: a patched voice_assistant (`components/`,
+  from ESPHome 2026.10.2) keeps the last second of mic audio and, on a wake-word
+  start, sends `wake_word_preroll` (200 ms) of it ahead of the live audio, so a
+  command said straight after the wake word is not cut. Logs the level profile
+  of that second for tuning.
 - **.11** Thinking spin at full level (was 70 %); warm white warmer, about
   3000 K: (1.0, 0.70, 0.35).
 - **.10** Diagnostic switch "LED gamma compensation" (on by default) for the

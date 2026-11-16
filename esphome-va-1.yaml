@@ -16,12 +16,13 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.16.11"
+  fw_version: "2026.11.17.6"
 
   # ---- Tunables -------------------------------------------------------------
 
-  # Adaptive volume: attenuation A = clamp(S - room noise - (C + offset), 0, max)
-  loudness_constant_db: "26"  # C: reply this far above the room at full slider; the HA offset adds -6..+6
+  # Adaptive volume: attenuation A = clamp(S - room noise - (C + offset), 0, max),
+  # S = speaker-to-mic path gain + analogue gain (measured, constant for the hardware)
+  loudness_constant_db: "26"  # C: reply this far above the room at full slider (assumes the speaker output 46 dB below full scale); the HA offset adds -6..+6
   max_attenuation_db: "30"    # largest adaptive reduction
   # Volume range (each used in two places, so they cannot drift apart)
   master_volume_min_db: "-40" # codec master volume floor (audio stack and adaptive volume)
@@ -34,11 +35,16 @@ substitutions:
   announcement_offset_db: "6"
   urgent_offset_db: "6"       # extra, for the next announcement after the set_announcement_offset action
 
-  es7210_gain_db: "21.0" # mic ADC gain, fixed at boot; 3 dB steps (intercom profile uses 24)
+  es7210_gain_db: "24.0" # mic ADC gain, fixed at boot; 3 dB steps. 24 + Mic Gain trim 15 = speech about -27 dBFS at arm's length
   # Front-end mic mode (build time; changing it needs Clean Build Files):
   #   "2" = both mics, echo cancellation + BSS (normal)
   #   "1" = right mic only, echo cancellation, no BSS (for comparison tests)
   afe_mic_num: "2"
+
+  # Audio from just before a wake-word start, sent to HA ahead of the live audio, so a
+  # command said straight after the wake word is not cut (patched voice_assistant in
+  # components/). 0ms = off. Too long and STT hears the end of the wake word.
+  wake_word_preroll: 200ms
 
   pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
   hidden_ssid: "false"
@@ -358,9 +364,8 @@ light:
                 d = std::min(d, n - d);
                 v = std::max(v, 1.0f - d);
               }
-              // gamma compensation (switch "LED gamma compensation", diagnostic)
-              const float e = id(led_gamma_compensation).state ? 1.0f / 2.8f : 1.0f;
-              it[i] = current_color * static_cast<uint8_t>(255.0f * powf(std::max(v, 0.0f), e));  // full level
+              // cross-fade compensated for the light's gamma 2.8, so the glide looks even
+              it[i] = current_color * static_cast<uint8_t>(255.0f * powf(std::max(v, 0.0f), 1.0f / 2.8f));  // full level
             }
       # Volume level: the share of lit LEDs is the media player volume (at
       # least one LED unless the volume is 0)
@@ -380,9 +385,15 @@ external_components:
   # the n-IA-hane/esp-gmf fork. Pinned by commit.
   - source: github://rgitha/esphome-audio-stack@487db8fd33a41ba2c0b48f8abeb9df5a276c3d68
     components: [esp_audio_stack, esp_afe]
-  # v0.3.1 (in development), pinned by commit
-  - source: github://rgitha/esphome-adaptive-volume@34b9b1d39ac5b1d371fe86a76232d2be69faa24d
+  # v0.4.2 (in development, main), pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@3b2d16738f9178176894e03e9d11f47990ce33de
     components: [adaptive_volume]
+  # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch. Local while
+  # testing: the components/ folder must sit next to this YAML.
+  - source:
+      type: local
+      path: components
+    components: [voice_assistant]
 
 # Audio hardware: one shared I2S bus in 4-slot TDM at 48 kHz.
 # ES7210 slots: 0 = right mic, 2 = left mic, 1 = ES8311 playback reference, 3 = unused
@@ -486,7 +497,10 @@ adaptive_volume:
     return id(external_media_player).is_muted() || id(mic_is_muted) || !id(amp_enable_8).state ||
            id(http_media_source).get_state() == media_source::MediaSourceState::PLAYING ||
            id(sendspin_media_source).get_state() == media_source::MediaSourceState::PLAYING;
-  speaker_level_nominal: -30   # S before the first measured reply (this hardware, A-weighted)
+  speaker_level_nominal: -30   # (S_k diagnostic only in path mode)
+  # Path mode: S = path gain (speaker reference -> mic, cross-correlation) + the
+  # analogue gain (room noise follows the analogue gain, the path gain does not)
+  analog_gain: ${es7210_gain_db}
   loudness_constant: ${loudness_constant_db}
   max_attenuation: ${max_attenuation_db}
   master_volume_min_db: ${master_volume_min_db}
@@ -499,11 +513,14 @@ adaptive_volume:
     mode: slider
   room_noise:
     name: Room noise
-  speaker_level:
-    name: Speaker level
+  # Path gain speaker -> mic: the median in use, and each reply's (diagnostics)
+  path_gain:
+    name: Speaker path gain
+  path_gain_reply:
+    name: Speaker path gain (last reply)
+  # Old reply level method, for comparison (diagnostic)
   speaker_level_reply:
     name: Speaker level (last reply)
-    disabled_by_default: true # calibration tuning only
   attenuation:
     name: Adaptive volume reduction
   current_volume:
@@ -743,6 +760,7 @@ voice_assistant:
   noise_suppression_level: 0
   auto_gain: 0dBFS
   volume_multiplier: 1
+  wake_word_preroll: ${wake_word_preroll}
   on_client_connected:
     - if:
         condition:
@@ -1437,15 +1455,6 @@ select:
             id(saved_alarm_action) = x;
 
 switch:
-  # Diagnostic: the explicit gamma compensation in the LED effects (only the
-  # thinking spin's cross-fade uses it). Off: raw levels, to compare.
-  - platform: template
-    id: led_gamma_compensation
-    name: "LED gamma compensation"
-    icon: mdi:gamma
-    entity_category: diagnostic
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
   # Echo cancellation on/off for A/B testing (keep on for normal use). The
   # speaker level calibration needs it on; while off, calibration pauses.
   - platform: esp_afe
@@ -1594,9 +1603,14 @@ number:
       entity_category: config
       disabled_by_default: true # tuning only
       # 0..+18 dB: digital attenuation can't undo clipping in the analogue chain
-      # (lower es7210_gain_db instead), and more digital gain mostly adds noise.
+      # (lower es7210_gain_db instead). Digital gain raises speech and room noise
+      # alike (same signal-to-noise ratio); its limit is clipping on loud close speech.
+      # Default +15 dB: with es7210_gain_db 24, speech at arm's length to 2 m is about
+      # -27 dBFS RMS; loud speech right into the device peaks just under full scale.
+      # Only the first boot uses it; after that the value set in HA is restored.
       min_value: 0
       max_value: 18
+      initial_value: 15
 
   - platform: template
     id: va_gain_factor0
@@ -1700,22 +1714,27 @@ number:
     mode: slider
 
 sensor:
+  # Memory and temperature diagnostics: off by default (enable in HA when needed)
   - platform: debug
     free:
       name: "Heap free"
       entity_category: diagnostic
+      disabled_by_default: true
     block:
       name: "Heap max block"
       entity_category: diagnostic
+      disabled_by_default: true
     psram:
       name: "PSRAM free"
       entity_category: diagnostic
+      disabled_by_default: true
     loop_time:
       name: "Loop time"
       entity_category: diagnostic
   - platform: internal_temperature
     name: "ESP temperature"
     entity_category: diagnostic
+    disabled_by_default: true
     update_interval: 60s
   # Battery voltage. Requires the hardware mod: 0R bridge on R78 pad 1 (BAT_ADC)
   # to pad 3 (GPIO6). Divider R2 200k / R11 100k -> pin sees 1/3 of the battery.

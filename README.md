@@ -8,10 +8,12 @@ ESPHome Home Assistant voice satellite for the Waveshare ESP32-S3-AUDIO-Board.
 | `CHANGELOG.md` | Firmware version history |
 | `sounds/` | Chimes made by `make_chimes.py`, and Voice PE sounds |
 | `models/` | The "Stop" wake word model |
+| `components/voice_assistant/` | ESPHome's voice_assistant with the wake-word pre-roll patch |
 
 The YAML needs ESPHome 2026.10 or later and a `secrets.yaml` with `wifi_ssid`,
 `wifi_password` and `api_key_esp32_audio_board` (ignored by git). Tunables are
-at the top of `substitutions`.
+at the top of `substitutions`. Copy the `components/` folder next to the YAML: the
+patched voice_assistant is loaded from there (`external_components`, local).
 
 ## Design notes
 
@@ -24,14 +26,22 @@ the wake word and the voice assistant. Type `sr` rather than `fd`: `fd`'s
 nonlinear processing lowered STT accuracy. `afe_mic_num: "1"` builds a
 single-mic front end for comparison tests.
 
-**Gain.** ES7210 gain is fixed at 21 dB (`es7210_gain_db`). "Mic Gain" in HA
-is a digital trim after the AFE. The wake word and voice assistant gain factors
-stay at 1: digital gain amplifies noise and clips.
+**Gain.** ES7210 gain is fixed at 24 dB (`es7210_gain_db`). "Mic Gain" in HA
+is a digital trim after the AFE, +15 dB by default: speech at arm's length to
+2 m reaches about -27 dBFS. The wake word and voice assistant gain factors stay
+at 1; the trim already sets the level for both.
 
 **Wake words.** okay_nabu and hey_jarvis, plus "stop" (cutoff 0.75; 0.50
 false-triggered on residual TTS echo). "Stop" is on from the end of a command
 until its reply has played, and while a timer rings. Saying it while a reply
 is pending cancels the reply.
+
+**Pre-roll.** micro_wake_word fires a few hundred ms after the wake word ends,
+so a command said straight after it lost its first syllable. The patched
+voice_assistant (`components/`, from ESPHome 2026.10.2) keeps the last second of
+mic audio and, on a wake-word start, sends `wake_word_preroll` (200 ms) of it
+ahead of the live audio. The log gives the level profile of that second per run.
+Too long and STT hears the end of the wake word.
 
 **Replies.** Replies play through the media player (`speaker_source`), which
 also takes HTTP media and Sendspin. Music is ducked during a voice run. ESPHome
@@ -41,10 +51,18 @@ end of playback, so LEDs, ducking and adaptive volume follow the audio.
 **Adaptive volume.** [esphome-adaptive-volume](https://github.com/rgitha/esphome-adaptive-volume):
 the HA volume slider is the level for a loud room; in a quieter room all sound
 is turned down through the codec master volume, so the slider never moves.
-Attenuation A = clamp(S − room noise − C, 0, max): S is the device's own speech
-level at its mics, measured on its replies (median of the last 3), C the
-loudness constant (26 dB) plus the "Adaptive volume offset" (−6..+6). HA
-announcements get +6 dB over the adapted level (+6 more when urgent).
+Attenuation A = clamp(S − room noise − C, 0, max). S is the speaker-to-mic path
+gain plus the analogue gain: during each reply the speaker reference (the ES8311
+output looped back into the ES7210, −24 dB divider and a ~3 kHz low-pass on the
+board) and mic 1 are compared per frequency (cross-spectrum), so S does not
+depend on what is played or which TTS voice, and talking during a reply does not
+bias it (median of the last 5, stored in flash). C is how far above the room
+replies should be: the loudness constant (26 dB) plus the "Adaptive volume
+offset" (−6..+6), for sound assumed 46 dB below full scale at the reference
+(typical speech). Room noise is measured on the AFE output before the Mic Gain
+trim. HA announcements get +6 dB over the adapted level (+6 more when urgent).
+Diagnostics: Speaker path gain (and per reply), Speaker level (last reply, the
+older method), Echo reduction, Room noise.
 
 **Sendspin.** Synchronized multi-room audio as on Voice PE. The ES8311 output
 delay is unknown, so the Sendspin static delay is adjustable from the server.
@@ -72,7 +90,8 @@ Night mode caps the LED brightness only.
 **Pinned sources.** All external code and files are pinned to commits or
 published versions: the audio stack fork and adaptive volume by commit, sounds
 and the stop model from this repository at `repo_ref`, the other wake word
-models from a commit of esphome/micro-wake-word-models. After changing a sound
+models from a commit of esphome/micro-wake-word-models. The patched
+voice_assistant is in `components/` here. After changing a sound
 or model, push it and set `repo_ref` to that commit.
 
 **Battery.** Read on GPIO6, which needs a hardware change: R78 bridged from pad
