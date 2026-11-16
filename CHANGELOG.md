@@ -2,8 +2,60 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.16
+
+- **.11** Thinking spin at full level (was 70 %); warm white warmer, about
+  3000 K: (1.0, 0.70, 0.35).
+- **.10** Diagnostic switch "LED gamma compensation" (on by default) for the
+  explicit gamma compensation in the thinking spin's cross-fade.
+- **.9** Long replies: on_end waited at most 30 s in total, so the LEDs (and the
+  stop word, and adaptive volume's measurement) ended early on replies that
+  started late or ran long; it now waits up to 30 s for the reply to start, then
+  as long as it plays. Pulses: own breathing effects (smooth, 50-100 % of the
+  ring brightness, so they follow it and night mode): reply coming 2.4 s,
+  replying and voice heard 1.2 s, timer ringing 1.2 s, provisioning 2.4 s.
+  Warmer white (1.0, 0.75, 0.45); more violet (0.55, 0, 1).
+  Thinking spin: position from a whole-number time remainder (a float of the
+  raw uptime lost precision after hours and would make the motion jerky).
+- **.8** LED scheme closer to the commercial assistants, with a privacy rule:
+  blue/violet only while the mic streams to HA. Woken: steady blue; HA hears
+  your voice: violet pulse; thinking: warm white slow spin; reply coming: warm
+  white slow pulse; replying: warm white faster pulse. Volume: white, number of
+  LEDs = level. Timers: white countdown and white pulse. Mute: amber flash and
+  amber pilot; unmute: white flash and white pilot. Errors, not ready and HA
+  disconnected: steady red. Provisioning: white slow pulse.
+- **.7** Rotation: two opposite spokes gliding smoothly clockwise (cross-fade
+  between LEDs, gamma-compensated), so the direction is obvious.
+- **.6** Rotation pattern: alternate LEDs on and off, like a wheel's spokes.
+- **.5** Rotation clockwise (seen from the speaker side); slow rotation at 70 %.
+- **.4** Rotation: 4 LEDs on, 3 off, rotating (instead of the comet). Pulse
+  Medium (voice detected, HA disconnected, provisioning) ramps without holds.
+- **.3** Reply pending and replying: a rotating amber comet (slow, then fast)
+  instead of the wipes.
+- **.2** Voice LED colours reworked: listening steady blue, voice detected pink
+  pulse, thinking amber pulse, reply pending amber slow wipe, replying amber fast
+  wipe (full level). Red is now only for problems.
+- **.1** Pulse effects dip to 50 % instead of 30 % (30 % looked almost off).
+
 ## 2026.11.15
 
+- **.13** Temporary CPU diagnostics removed (per-component loop time, per-task
+  CPU time and core load sensors, and their FreeRTOS options). Final task layout:
+  AFE feed on core 1; audio stack, wake word and AFE fetch on core 0.
+- **.12** Wake word VAD cutoff 0.1 (was 0.2): it rejected a real "Okay Nabu"
+  said over music.
+- **.11** Audio stack task moved to core 0 (with the wake word): with it and the
+  AFE feed on core 1, the main loop got too few turns under music + voice.
+- **.10** CPU and memory under music + voice:
+  - AFE feed task (echo cancellation, BSS) moved to core 1, fetch to core 0:
+    with feed and wake word both on core 0 it ran at ~90 % and the wake word
+    dropped audio when a reply started during music.
+  - Sendspin task stacks in PSRAM (largest free internal block fell to ~15 KB).
+  - Adaptive volume does not calibrate on replies played over music.
+- **.9** Temporary diagnostics: main-loop time per component (runtime_stats)
+  and CPU time per task with core load sensors, logged every 60 s.
+- **.8** Diagnostics: free heap, largest free block, free PSRAM, loop time, ESP
+  temperature and reset reason (debug component).
 - **.7** adaptive_volume v0.3.1: "Echo reduction" diagnostic, reported after
   each stretch of playback (the log line also gives the mic peak).
 - **.6** adaptive_volume v0.3.0 now also skips the first 1 s of idle after boot

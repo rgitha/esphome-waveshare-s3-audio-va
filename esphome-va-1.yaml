@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.15.7"
+  fw_version: "2026.11.16.11"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -183,6 +183,10 @@ wifi:
 #  enable_ipv6: true
 
 # Enable logging
+# Memory and health diagnostics (debug component), every 30 s
+debug:
+  update_interval: 30s
+
 logger:
 
 api:
@@ -294,7 +298,7 @@ light:
       # the first timer (full at the start, one LED off every 1/7 of it).
       # Whole LEDs only: with the strip's gamma 2.8 a partly dimmed LED looks
       # off or flickers. Seconds are interpolated between timer ticks. Pilot
-      # position red while the microphone is muted.
+      # position amber while the microphone is muted.
       - addressable_lambda:
           name: "Timer Tick"
           update_interval: 100ms
@@ -311,48 +315,64 @@ light:
             const int lit = std::min(n, static_cast<int>(std::ceil(n * left / total - 0.001f)));
             for (int i = 0; i < n; i++)
               it[i] = i < lit ? current_color : Color::BLACK;
-            if (id(mic_is_muted)) it[${pilot_led}] = Color(255, 0, 0) * ${pilot_dim};
-      - pulse:
-          name: "Pulse Slow"
-          min_brightness: 30%
-          max_brightness: 100%
-          transition_length: 2000ms
-          update_interval: 3000ms
-      - pulse:
-          name: "Pulse Medium"
-          min_brightness: 30%
-          max_brightness: 100%
-          transition_length: 600ms
-          update_interval: 1200ms
-      - pulse:
-          name: "Pulse Fast"
-          min_brightness: 30%
-          max_brightness: 100%
-          transition_length: 300ms
-          update_interval: 600ms
+            if (id(mic_is_muted)) it[${pilot_led}] = Color(255, 128, 0) * ${pilot_dim};  // amber: mic off
+      # Breathing pulses: brightness swings smoothly (raised cosine) between
+      # 50 % and 100 % of the ring brightness, so they follow the LED ring
+      # brightness and night mode (ESPHome's pulse effect uses absolute
+      # brightness). Full cycle 2.4 s or 1.2 s.
+      - addressable_lambda:
+          name: "Breathe 2.4s"
+          update_interval: 20ms
+          lambda: |-
+            const float t = (millis() % 2400) / 2400.0f;
+            const float f = 0.75f - 0.25f * cosf(2.0f * static_cast<float>(M_PI) * t);  // 0.5 .. 1.0
+            it.all() = current_color * static_cast<uint8_t>(255.0f * f);
+      - addressable_lambda:
+          name: "Breathe 1.2s"
+          update_interval: 20ms
+          lambda: |-
+            const float t = (millis() % 1200) / 1200.0f;
+            const float f = 0.75f - 0.25f * cosf(2.0f * static_cast<float>(M_PI) * t);  // 0.5 .. 1.0
+            it.all() = current_color * static_cast<uint8_t>(255.0f * f);
       - addressable_rainbow:
           name: "Rainbow Slow"
           speed: 4
           width: 7
-      # Reply pending: the reply colour, steady (same level as the Wipe colours)
+      # Thinking: two spokes opposite each other gliding clockwise (seen
+      # from the speaker side, i.e. falling LED index) in the light's colour
+      # (warm white). Each spoke cross-fades between neighbouring LEDs; levels are
+      # gamma-compensated (strip gamma 2.8) so the fade looks even. Position is
+      # computed from the time, so the speed holds even when updates are late.
+      # One LED per 250 ms, full level.
       - addressable_lambda:
-          name: "Reply Pending"
-          update_interval: 1s
-          lambda: it.all() = Color(153, 26, 26);
-      # Reply: a colour wipe ignores the light's colour (default is random
-      # colours), so the reply colour is set here: 4 lit, 3 dark, moving.
-      - addressable_color_wipe:
-          name: "Wipe"
-          add_led_interval: 100ms
-          colors:
-            - red: 60%
-              green: 10%
-              blue: 10%
-              num_leds: 4
-            - red: 0%
-              green: 0%
-              blue: 0%
-              num_leds: 3
+          name: "Rotate Slow"
+          update_interval: 20ms
+          lambda: |-
+            const int n = ${led_num};
+            // whole-number remainder first: a float of the raw millis() loses precision after hours
+            const float pos = fmodf(n - (millis() % (250u * n)) / 250.0f, n);  // clockwise
+            for (int i = 0; i < n; i++) {
+              float v = 0.0f;
+              for (float off : {0.0f, n / 2.0f}) {
+                float d = fabsf(i - fmodf(pos + off, n));
+                d = std::min(d, n - d);
+                v = std::max(v, 1.0f - d);
+              }
+              // gamma compensation (switch "LED gamma compensation", diagnostic)
+              const float e = id(led_gamma_compensation).state ? 1.0f / 2.8f : 1.0f;
+              it[i] = current_color * static_cast<uint8_t>(255.0f * powf(std::max(v, 0.0f), e));  // full level
+            }
+      # Volume level: the share of lit LEDs is the media player volume (at
+      # least one LED unless the volume is 0)
+      - addressable_lambda:
+          name: "Volume Level"
+          update_interval: 100ms
+          lambda: |-
+            const int n = ${led_num};
+            const float v = id(external_media_player).volume;
+            const int lit = v <= 0.0f ? 0 : std::max(1, static_cast<int>(lroundf(v * n)));
+            for (int i = 0; i < n; i++)
+              it[i] = i < lit ? current_color : Color::BLACK;
 
 external_components:
   # Backup fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus one commit that
@@ -378,8 +398,10 @@ esp_audio_stack:
   sample_rate: 48000
   output_sample_rate: 16000
   processor_id: afe_processor
-  # Task placement and PSRAM buffers from the board-tested intercom profile
-  task_core: 1
+  # PSRAM buffers from the board-tested intercom profile. Audio task on core 0
+  # (with the wake word): core 1 carries the AFE feed task, and with both there
+  # the main loop got too few turns (~22 loops/s, gaps up to 0.25 s).
+  task_core: 0
   task_priority: 19
   task_stack_size: 8192
   audio_task_stack_in_psram: true
@@ -428,10 +450,11 @@ esp_afe:
   task_core: 1
   task_priority: 5
   ringbuf_size: 8
-  feed_task_core: 0
+  feed_task_core: 1   # feed (echo cancellation, BSS) on core 1: on core 0 with the
+                      # wake word it took core 0 to ~90 % and the wake word dropped audio
   feed_task_priority: 5
   feed_task_stack_size: 3072
-  fetch_task_core: 1
+  fetch_task_core: 0  # must differ from feed_task_core
   fetch_task_priority: 5
   fetch_task_stack_size: 3072
   feed_buf_in_psram: true
@@ -457,8 +480,12 @@ adaptive_volume:
     return id(va_run_active) && id(voice_assistant_phase) == ${voice_assist_replying_phase_id} &&
            id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
   # Output muted or amplifier off: a reply measured now is not counted
+  # Not counted: muted, amplifier off, or music playing under the reply (the mix
+  # with ducked music does not give a clean reply level)
   blocked: |-
-    return id(external_media_player).is_muted() || id(mic_is_muted) || !id(amp_enable_8).state;
+    return id(external_media_player).is_muted() || id(mic_is_muted) || !id(amp_enable_8).state ||
+           id(http_media_source).get_state() == media_source::MediaSourceState::PLAYING ||
+           id(sendspin_media_source).get_state() == media_source::MediaSourceState::PLAYING;
   speaker_level_nominal: -30   # S before the first measured reply (this hardware, A-weighted)
   loudness_constant: ${loudness_constant_db}
   max_attenuation: ${max_attenuation_db}
@@ -519,7 +546,7 @@ speaker:
 
 sendspin:
   id: sendspin_hub
-  task_stack_in_psram: false
+  task_stack_in_psram: true  # frees internal RAM (largest free block fell to ~15 KB with music + replies)
 
 audio_file:
   - id: mute_switch_on_sound
@@ -648,7 +675,7 @@ micro_wake_word:
       probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
   vad:
     model: ${mww_models_url}/vad.json
-    probability_cutoff: 0.2
+    probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
   on_wake_word_detected:
     # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing
     - if:
@@ -839,17 +866,20 @@ voice_assistant:
           voice_assistant.is_running:
     # The reply may still be pending or playing: ESPHome ends the run when
     # playback has not started within 2 s, though it starts later. Wait for the
-    # real end of playback (not after an error).
+    # real end of playback (not after an error): up to 30 s for the reply to
+    # start, then for as long as it plays (10 min safety limit).
     - if:
         condition:
           lambda: return id(voice_assistant_phase) != ${voice_assist_error_phase_id};
         then:
           - wait_until:
               condition:
-                lambda: |-
-                  return !id(reply_pending) &&
-                         id(external_media_player).state != media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+                lambda: return !id(reply_pending);
               timeout: 30s
+          - wait_until:
+              condition:
+                lambda: return id(external_media_player).state != media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+              timeout: 10min
     # Unless a new run started meanwhile (it owns the phase and LEDs):
     # stop ducking and go back to idle
     - if:
@@ -1032,9 +1062,10 @@ script:
     then:
       - light.turn_on:
           id: status_ring
-          red: !lambda 'return muted ? 1.0f : 0.0f;'
-          green: !lambda 'return muted ? 0.0f : 1.0f;'
-          blue: 0.0
+          # mute: amber, unmute: white (then the pilot in the same colour)
+          red: 1.0
+          green: !lambda 'return muted ? 0.5f : 1.0f;'
+          blue: !lambda 'return muted ? 0.0f : 1.0f;'
           brightness: 100%
           effect: None # full ring (without it the running Pilot effect stays)
       - delay: 250ms
@@ -1106,8 +1137,11 @@ script:
             id(led_set_effect).execute(effect, r, g, b);
           };
 
+          // Colours: blue/violet = mic streaming to HA; warm white = the device's
+          // turn; white = information (volume, timers, unmute); amber = mic off;
+          // red = a problem.
           if (improv_ble) {                          // Provisioning
-            set("Pulse Medium", 1.0, 0.89, 0.71);    // warm white
+            set("Breathe 2.4s", 1.0, 1.0, 1.0);      // white, slow pulse
             return;
           }
           if (init_progress) {                       // Boot/init
@@ -1115,36 +1149,36 @@ script:
             return;
           }
           if (!wifi_connected || !api_connected) {   // HA disconnected
-            set("Pulse Medium", 1.0, 0.0, 0.0);
+            set("solid", 1.0, 0.0, 0.0);             // steady red
             return;
           }
           if (ringing) {                             // Timer ringing
-            set("Pulse Fast", 0.0, 0.6, 0.6);        // teal, like the countdown
+            set("Breathe 1.2s", 1.0, 1.0, 1.0);      // white pulse
             return;
           }
 
           // Voice assistant phases
           switch (phase) {
             case ${voice_assist_waiting_for_command_phase_id}: // just woke
-              set("solid", 0.5, 0.0, 0.5);  // calm solid violet
+              set("solid", 0.0, 0.0, 1.0);  // steady blue
               return;
             case ${voice_assist_listening_for_command_phase_id}:
-              set("Pulse Medium", 0.3, 0.0, 0.8);
+              set("Breathe 1.2s", 0.55, 0.0, 1.0);  // violet pulse: HA hears your voice
               return;
             case ${voice_assist_thinking_phase_id}:
-              set("Pulse Slow", 0.6, 0.3, 0.1);
+              set("Rotate Slow", 1.0, 0.70, 0.35);  // warm white (~3000 K), slow spin
               return;
             case ${voice_assist_reply_pending_phase_id}:
-              set("Reply Pending", 0.6, 0.1, 0.1);  // steady red until the audio starts
+              set("Breathe 2.4s", 1.0, 0.70, 0.35);  // warm white (~3000 K), slow pulse: reply coming
               return;
             case ${voice_assist_replying_phase_id}:
-              set("Wipe", 0.6, 0.1, 0.1);  // colour set in the Wipe effect
+              set("Breathe 1.2s", 1.0, 0.70, 0.35);  // warm white (~3000 K), faster pulse: speaking
               return;
             case ${voice_assist_error_phase_id}:
-              set("Pulse Fast", 1.0, 0.0, 0.0);
+              set("solid", 1.0, 0.0, 0.0);  // steady red
               return;
             case ${voice_assist_not_ready_phase_id}:
-              set("Pulse Slow", 1.0, 0.0, 0.0);
+              set("solid", 1.0, 0.0, 0.0);  // steady red
               return;
             default: break;
           }
@@ -1152,27 +1186,27 @@ script:
           // Timers ticking: countdown of the first timer on the ring
           if (timers_active) {
             id(fetch_first_active_timer).execute();
-            set("Timer Tick", 0.0, 0.6, 0.6);  // teal: apart from the violet/blue voice states
+            set("Timer Tick", 1.0, 1.0, 1.0);  // white countdown
             return;
           }
 
-          // Idle: pilot LED, dim red while the microphone is muted, else dim white
-          if (id(mic_is_muted)) set("Pilot", 1.0, 0.0, 0.0);
+          // Idle: pilot LED, dim amber while the microphone is muted, else dim white
+          if (id(mic_is_muted)) set("Pilot", 1.0, 0.5, 0.0);
           else set("Pilot", 1.0, 1.0, 1.0);
 
-  # Brief green pulse when volume changes, then restore
+  # Volume change: white, number of lit LEDs = volume level, for 1.2 s
   - id: control_leds_volume_changed
     mode: restart
     then:
       - light.turn_on:
           id: status_ring
           brightness: !lambda 'return id(led_ring_brightness).state;'
-          red: 0.0
-          green: 0.5
-          blue: 0.3
-          effect: "Pulse Fast"
+          red: 1.0
+          green: 1.0
+          blue: 1.0
+          effect: "Volume Level"
       - lambda: |-
-          ESP_LOGD("led", "volume_changed: flash green");
+          ESP_LOGD("led", "volume_changed: level %.0f %%", id(external_media_player).volume * 100.0f);
       - delay: 1.2s
       - script.execute: control_leds
 
@@ -1289,7 +1323,7 @@ script:
                     const int p = id(voice_assistant_phase);
                     return p != ${voice_assist_thinking_phase_id} && p != ${voice_assist_reply_pending_phase_id} &&
                            p != ${voice_assist_replying_phase_id};
-                timeout: 60s
+                timeout: 10min  # the phase follows the real end of the reply (on_end)
             - if:
                 condition:
                   switch.is_off: timer_ringing
@@ -1403,6 +1437,15 @@ select:
             id(saved_alarm_action) = x;
 
 switch:
+  # Diagnostic: the explicit gamma compensation in the LED effects (only the
+  # thinking spin's cross-fade uses it). Off: raw levels, to compare.
+  - platform: template
+    id: led_gamma_compensation
+    name: "LED gamma compensation"
+    icon: mdi:gamma
+    entity_category: diagnostic
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
   # Echo cancellation on/off for A/B testing (keep on for normal use). The
   # speaker level calibration needs it on; while off, calibration pauses.
   - platform: esp_afe
@@ -1657,6 +1700,23 @@ number:
     mode: slider
 
 sensor:
+  - platform: debug
+    free:
+      name: "Heap free"
+      entity_category: diagnostic
+    block:
+      name: "Heap max block"
+      entity_category: diagnostic
+    psram:
+      name: "PSRAM free"
+      entity_category: diagnostic
+    loop_time:
+      name: "Loop time"
+      entity_category: diagnostic
+  - platform: internal_temperature
+    name: "ESP temperature"
+    entity_category: diagnostic
+    update_interval: 60s
   # Battery voltage. Requires the hardware mod: 0R bridge on R78 pad 1 (BAT_ADC)
   # to pad 3 (GPIO6). Divider R2 200k / R11 100k -> pin sees 1/3 of the battery.
   # GPIO6 is ADC1 (works with Wi-Fi); it is also LCD_SDA3 (QSPI LCD only) and
@@ -1739,6 +1799,10 @@ sensor:
     accuracy_decimals: 0
 
 text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Reset reason"
+      entity_category: diagnostic
   - platform: template
     id: next_timer_name
     name: "Next timer name"

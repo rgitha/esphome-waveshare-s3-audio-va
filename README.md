@@ -52,16 +52,20 @@ delay is unknown, so the Sendspin static delay is adjustable from the server.
 **LEDs** (7, index 0 almost opposite the USB port, then anticlockwise seen
 from the speaker side):
 
+Blue or violet means the microphone is streaming to HA; nothing else uses blue.
+
 | State | Ring |
 |---|---|
-| Idle | Pilot LED dim white; dim red when the mic is muted |
-| Woken / listening | Steady violet / blue pulse |
-| Thinking | Amber pulse |
-| Reply pending / playing | Steady red / red wipe |
-| Timer running / ringing | Teal countdown / teal fast pulse |
-| Volume change | Green |
-| Mute / unmute | Red / green flash |
-| Error / not ready | Red fast / slow pulse |
+| Idle | Pilot LED dim white; dim amber when the mic is muted |
+| Woken / HA hears your voice | Steady blue / violet pulse |
+| Thinking | Warm white, two spokes spinning slowly clockwise |
+| Reply coming / replying | Warm white slow pulse / faster pulse |
+| Timer running / ringing | White countdown / white pulse |
+| Volume change | White, number of LEDs = volume level |
+| Mute / unmute | Amber flash / white flash |
+| Error, not ready, HA disconnected | Steady red |
+| Wi-Fi provisioning | White slow pulse |
+| Booting | Rainbow |
 
 Night mode caps the LED brightness only.
 
