@@ -4,6 +4,9 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.17
 
+- **.8** Wake-word pre-roll 150 ms (was 200).
+- **.7** The patched voice_assistant is loaded from this repository at `repo_ref`
+  (now 8cd3ca6) instead of a local folder.
 - **.6** adaptive_volume v0.4.2 from main (merged from coherent-s), pinned by commit.
 - **.5** adaptive_volume v0.4.2 (coherent-s): the path analysis runs in the main
   loop after each reply (the audio core only copies samples), against the wake word

@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.17.6"
+  fw_version: "2026.11.17.8"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -44,16 +44,16 @@ substitutions:
   # Audio from just before a wake-word start, sent to HA ahead of the live audio, so a
   # command said straight after the wake word is not cut (patched voice_assistant in
   # components/). 0ms = off. Too long and STT hears the end of the wake word.
-  wake_word_preroll: 200ms
+  wake_word_preroll: 150ms
 
   pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
   hidden_ssid: "false"
 
   # ---- Files ----------------------------------------------------------------
 
-  # Files in this repository (sounds/, models/), pinned to a commit. After changing
-  # a sound or model, push it and set repo_ref to that commit.
-  repo_ref: b695c750df15741f3418079e8847e29922ee66ad
+  # Files in this repository (sounds/, models/, components/), pinned to a commit.
+  # After changing one of them, push it and set repo_ref to that commit.
+  repo_ref: 8cd3ca6a83756ba532924f2cf2c11a0de8dfcfc5
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -388,11 +388,9 @@ external_components:
   # v0.4.2 (in development, main), pinned by commit
   - source: github://rgitha/esphome-adaptive-volume@3b2d16738f9178176894e03e9d11f47990ce33de
     components: [adaptive_volume]
-  # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch. Local while
-  # testing: the components/ folder must sit next to this YAML.
-  - source:
-      type: local
-      path: components
+  # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
+  # repository's components/ at repo_ref
+  - source: github://rgitha/esphome-waveshare-s3-audio-va@${repo_ref}
     components: [voice_assistant]
 
 # Audio hardware: one shared I2S bus in 4-slot TDM at 48 kHz.

@@ -12,8 +12,8 @@ ESPHome Home Assistant voice satellite for the Waveshare ESP32-S3-AUDIO-Board.
 
 The YAML needs ESPHome 2026.10 or later and a `secrets.yaml` with `wifi_ssid`,
 `wifi_password` and `api_key_esp32_audio_board` (ignored by git). Tunables are
-at the top of `substitutions`. Copy the `components/` folder next to the YAML: the
-patched voice_assistant is loaded from there (`external_components`, local).
+at the top of `substitutions`. The patched voice_assistant is loaded from this
+repository's `components/` at `repo_ref`, like the sounds and the stop model.
 
 ## Design notes
 
@@ -39,9 +39,15 @@ is pending cancels the reply.
 **Pre-roll.** micro_wake_word fires a few hundred ms after the wake word ends,
 so a command said straight after it lost its first syllable. The patched
 voice_assistant (`components/`, from ESPHome 2026.10.2) keeps the last second of
-mic audio and, on a wake-word start, sends `wake_word_preroll` (200 ms) of it
+mic audio and, on a wake-word start, sends `wake_word_preroll` (150 ms) of it
 ahead of the live audio. The log gives the level profile of that second per run.
 Too long and STT hears the end of the wake word.
+
+> **To do:** this patched copy is temporary. Once it has proven itself, the
+> pre-roll goes upstream (fork of esphome/esphome, branch from `dev`, the patch
+> ported with a test config, plus a docs PR for `wake_word_preroll`). When an
+> ESPHome release includes it, remove `components/voice_assistant/` and its
+> `external_components` entry here.
 
 **Replies.** Replies play through the media player (`speaker_source`), which
 also takes HTTP media and Sendspin. Music is ducked during a voice run. ESPHome
@@ -91,7 +97,7 @@ Night mode caps the LED brightness only.
 published versions: the audio stack fork and adaptive volume by commit, sounds
 and the stop model from this repository at `repo_ref`, the other wake word
 models from a commit of esphome/micro-wake-word-models. The patched
-voice_assistant is in `components/` here. After changing a sound
+voice_assistant comes from `components/` here, also at `repo_ref`. After changing a sound
 or model, push it and set `repo_ref` to that commit.
 
 **Battery.** Read on GPIO6, which needs a hardware change: R78 bridged from pad
