@@ -2,8 +2,40 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.18
+
+- **.3** Thinking: a comet over the whole ring (full head, tail fading in linear
+  light), once round in 2 x `led_transition_ms` (250). From the pulse it sweeps in
+  gathering it; into the reply pulse its head sweeps once round filling the ring; to
+  idle it runs into the pilot and its tail shrinks into the head. Fills from and into
+  the pilot and crossfades take 1 x.
+- **.2** Thinking: one spoke jumping a LED at a time on a dimmer ring (half the
+  pilot level), instead of two gliding spokes. All motion (spin, fills, emptying
+  into the pilot) goes one LED per step, a full circle in twice `led_transition_ms`,
+  now 250. From the pulse, the spoke sweeps round the ring gathering it; into the
+  reply pulse, the ring fills from the spoke; to idle, the spoke runs into the pilot.
+- **.1** LED motion: one "Scene" effect draws every LED state and moves between
+  them (no effect switching). Woken: the ring fills clockwise from the pilot while
+  turning blue. Thinking: two single-LED spokes, in step, on a dim warm ring; from
+  the violet pulse they sweep in clockwise, gathering it. Reply coming: the spokes
+  fill their gaps clockwise into the pulse. Replying: the pulse speeds up in phase.
+  Back to idle: the ring empties clockwise into the pilot; from the spin, both spokes
+  run into the pilot and merge. Other changes crossfade. Colours blend in linear
+  light. One timing, `led_transition_ms` (300): spin step = 1/3 of it, fills from and
+  into the pilot twice as fast.
+
 ## 2026.11.17
 
+- **.11** OTA update on the LEDs in green (used for nothing else): dim green ring,
+  bright green fill clockwise as the update progresses; red for 3 s on failure. The
+  wake word, voice assistant and media player stop when the update begins.
+- **.10** Mute/unmute flash at the ring brightness (was 100 %). The flash and all
+  steady states (woken blue, red errors) use a new "Ring" effect, so they switch in
+  at once: leaving an effect with effect None faded from a full ring in the old
+  colour (amber before the white flash, white before the woken blue). Turning the
+  ring off has no fade either.
+- **.9** (test build only, not kept) adaptive_volume v0.4.3 (noise-median). The
+  firmware stays on v0.4.2.
 - **.8** Wake-word pre-roll 150 ms (was 200).
 - **.7** The patched voice_assistant is loaded from this repository at `repo_ref`
   (now 8cd3ca6) instead of a local folder.

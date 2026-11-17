@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.17.8"
+  fw_version: "2026.11.18.3"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -46,7 +46,11 @@ substitutions:
   # components/). 0ms = off. Too long and STT hears the end of the wake word.
   wake_word_preroll: 150ms
 
+  # LED transitions (ms): crossfades and the fill from / empty into the pilot take this
+  # long; the thinking comet, and the moves into and out of it, go round in twice this.
+  led_transition_ms: '250'
   pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
+
   hidden_ssid: "false"
 
   # ---- Files ----------------------------------------------------------------
@@ -249,6 +253,64 @@ ota:
   - platform: esphome
     id: ota_esphome
     encryption: # uses the api: encryption key
+    # LEDs show the update in green (used for nothing else). Audio stops first so
+    # its tasks don't compete with the transfer; the device reboots at the end.
+    on_begin:
+      then:
+        - micro_wake_word.stop:
+        - voice_assistant.stop:
+        - media_player.stop:
+            id: external_media_player
+        - lambda: |-
+            id(ota_last_lit) = 0;
+            const float PCT = 0.0f;
+            // OTA: green, the only use of green. Dim green ring, bright green
+            // fill clockwise from the pilot LED (lit share = progress). The
+            // transfer blocks the main loop, so the strip is written directly.
+            auto *strip = static_cast<light::AddressableLight *>(id(status_ring).get_output());
+            const int n = ${led_num};
+            const int lit = static_cast<int>(PCT * n / 100.0f + 0.5f);
+            for (int k = 0; k < n; k++) {
+              const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
+              // the strip's colour correction applies the ring brightness and gamma;
+              // the dim level matches the pilot light
+              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_dim}, 0);
+            }
+            strip->write_state(id(status_ring));  // id() is already the LightState pointer
+    on_progress:
+      then:
+        - lambda: |-
+            const float PCT = x;
+            // redraw only when the number of lit LEDs changes
+            const int now = static_cast<int>(PCT * ${led_num} / 100.0f + 0.5f);
+            if (now == id(ota_last_lit))
+              return;
+            id(ota_last_lit) = now;
+            // OTA: green, the only use of green. Dim green ring, bright green
+            // fill clockwise from the pilot LED (lit share = progress). The
+            // transfer blocks the main loop, so the strip is written directly.
+            auto *strip = static_cast<light::AddressableLight *>(id(status_ring).get_output());
+            const int n = ${led_num};
+            const int lit = static_cast<int>(PCT * n / 100.0f + 0.5f);
+            for (int k = 0; k < n; k++) {
+              const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
+              // the strip's colour correction applies the ring brightness and gamma;
+              // the dim level matches the pilot light
+              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_dim}, 0);
+            }
+            strip->write_state(id(status_ring));  // id() is already the LightState pointer
+    on_error:
+      then:
+        # problem: red (the device keeps running the old firmware)
+        - script.execute:
+            id: led_set_effect
+            effect: "Ring"
+            r: 1.0
+            g: 0.0
+            b: 0.0
+        - delay: 3s
+        - micro_wake_word.start:
+        - script.execute: control_leds
 
 i2c:
   - id: internal_i2c
@@ -292,92 +354,233 @@ light:
     channel_colors: RGB
     default_transition_length: 150ms
     effects:
-      # Pilot light: one LED (opposite the USB connector) in the light's colour,
-      # dimmed here (RGB is normalised to full scale, so dim in the effect)
+      # All LED states are drawn by this one effect, so the light never switches
+      # effects (an effect switch is either instant or fades from a wrong colour).
+      # led_set_effect sets the requested scene (led_scene) and colour; on a change the
+      # renderer moves from what is showing to the new scene:
+      #   idle -> steady ring (woken): fill clockwise from the pilot, colour changing on the way
+      #   pulse -> spin (thinking): the comet enters after the pilot and sweeps once round,
+      #     gathering the pulse; at the pilot it spins on
+      #   spin -> slow pulse (reply coming): the head sweeps on once round, filling everything
+      #   slow -> fast pulse (replying): same pulse, faster, phase kept
+      #   spin -> idle: the comet runs into the pilot, its tail shrinks into the head there
+      #   other -> idle: the ring empties clockwise into the pilot
+      #   anything else: crossfade
+      # Thinking is a comet: a full head and a tail over the rest of the ring, fading in
+      # linear light, on a dim ring. One timing, led_transition_ms: crossfades take it, the
+      # fill from and the empty into the pilot go once round in it, and the comet and the
+      # moves into and out of it go once round in twice it, so the comet never changes
+      # speed. Fills and the spin move clockwise (falling LED index). Colour
+      # blends are done in linear light (after the strip's gamma 2.8), so a fade does
+      # not dip darker halfway. Values here are before the ring brightness, which the
+      # light applies, with its gamma.
       - addressable_lambda:
-          name: "Pilot"
-          update_interval: 1s
+          name: "Scene"
+          update_interval: 10ms
           lambda: |-
-            it.all() = Color::BLACK;
-            it[${pilot_led}] = current_color * ${pilot_dim};
-      # Timer countdown: of the LEDs, the share still lit is the time left on
-      # the first timer (full at the start, one LED off every 1/7 of it).
-      # Whole LEDs only: with the strip's gamma 2.8 a partly dimmed LED looks
-      # off or flickers. Seconds are interpolated between timer ticks. Pilot
-      # position amber while the microphone is muted.
-      - addressable_lambda:
-          name: "Timer Tick"
-          update_interval: 100ms
-          lambda: |-
-            static uint32_t last_left = UINT32_MAX, last_ms = 0;
-            const auto &t = id(first_active_timer);
-            if (t.seconds_left != last_left) {
-              last_left = t.seconds_left;
-              last_ms = millis();
+            constexpr int N = ${led_num}, P0 = ${pilot_led};
+            constexpr float GAMMA = 2.8f, TWO_PI = 6.2831853f;
+            constexpr int TAIL = N - 1;                                   // comet tail: the whole ring
+            const float D = ${led_transition_ms};
+            const float STEP = D / N, CSTEP = 2.0f * D / N;               // fills: a circle in D; comet: in 2 x D
+            const float PILOT = ${pilot_dim} / 255.0f, BG = PILOT / 2;    // comet background: half the pilot level
+            enum { IDLE, RING, FLASH, BREATHE_SLOW, BREATHE_FAST, SPIN, TIMER, VOLUME };
+            enum { NONE, XFADE, FILL, GATHER, TO_PULSE, EMPTY, SPIN_TO_IDLE };
+            struct Col { float r, g, b; };
+
+            static Col frame[N], from[N];
+            static int scene = IDLE, choreo = NONE;
+            static Col col{1, 1, 1}, prev_col{1, 1, 1};
+            static uint32_t t0 = 0, live0 = 0;
+            static float phase = 0, spoke_pos = 0, dist = 0, end = 0;
+            static uint32_t timer_left = UINT32_MAX, timer_ms = 0;
+
+            auto clampf = [](float x, float a, float b) { return x < a ? a : (x > b ? b : x); };
+            auto smooth = [&](float x) { x = clampf(x, 0, 1); return x * x * (3 - 2 * x); };
+            auto lin = [&](float v) { return powf(clampf(v, 0, 1), GAMMA); };
+            auto unlin = [&](float l) { return powf(clampf(l, 0, 1), 1.0f / GAMMA); };
+            auto mix = [&](Col a, Col b, float t) {
+              return Col{unlin(lin(a.r) * (1 - t) + lin(b.r) * t), unlin(lin(a.g) * (1 - t) + lin(b.g) * t),
+                         unlin(lin(a.b) * (1 - t) + lin(b.b) * t)};
+            };
+            auto scale = [](Col c, float s) { return Col{c.r * s, c.g * s, c.b * s}; };
+            auto level = [](Col c) { return std::max(c.r, std::max(c.g, c.b)); };
+            auto hue = [&](Col c, Col fallback) { const float l = level(c); return l > 0.001f ? scale(c, 1 / l) : fallback; };
+            auto recolour = [&](Col c, Col to, float a) { return mix(c, scale(to, level(c)), a); };
+            auto cw = [](int s, int k) { return ((s - k) % N + N) % N; };  // k steps clockwise
+            auto ms_since = [](uint32_t now, uint32_t t) { return static_cast<float>(static_cast<int32_t>(now - t)); };
+
+            // ---- the live look of each scene (tau = ms since it began) ----
+            auto tail_l = [](int j, int len) {  // tail light behind the head, linear light
+              return (j >= 1 && j <= len) ? powf(1.0f - static_cast<float>(j) / (TAIL + 1), 2.2f) : 0.0f;
+            };
+            auto comet = [&](int head, Col c, float bg_scale, int len, Col *out) {
+              float l[N];
+              for (int i = 0; i < N; i++) l[i] = lin(BG) * bg_scale;
+              l[head] = 1;
+              for (int j = 1; j <= len; j++) { const int led = cw(head, -j); l[led] = std::max(l[led], tail_l(j, len)); }
+              for (int i = 0; i < N; i++) out[i] = scale(c, unlin(l[i]));
+            };
+            auto spin = [&](float tau, Col c, Col *out) {  // the comet, head jumping clockwise a step at a time
+              comet(cw(P0, static_cast<int>(floorf(tau / CSTEP))), c, 1, TAIL, out);
+            };
+            auto live = [&](int s, float tau, Col *out) {
+              for (int i = 0; i < N; i++) out[i] = Col{0, 0, 0};
+              switch (s) {
+                case IDLE: out[P0] = scale(col, PILOT); break;
+                case RING:
+                case FLASH: for (int i = 0; i < N; i++) out[i] = col; break;
+                case BREATHE_SLOW:
+                case BREATHE_FAST: {
+                  const float period = s == BREATHE_SLOW ? 2400.0f : 1200.0f;
+                  const float t = fmodf(tau + phase, period) / period;
+                  for (int i = 0; i < N; i++) out[i] = scale(col, 0.75f + 0.25f * cosf(TWO_PI * t));  // from the peak
+                  break;
+                }
+                case SPIN: spin(tau, col, out); break;
+                case TIMER: {  // countdown: share of lit LEDs = time left, whole LEDs, seconds interpolated
+                  const auto &tm = id(first_active_timer);
+                  if (tm.seconds_left != timer_left) { timer_left = tm.seconds_left; timer_ms = millis(); }
+                  const float total = std::max(tm.total_seconds, static_cast<uint32_t>(1));
+                  const float left = std::max(tm.seconds_left - std::min((millis() - timer_ms) / 1000.0f, 1.0f), 0.0f);
+                  const int lit = std::min(N, static_cast<int>(ceilf(N * left / total - 0.001f)));
+                  for (int i = 0; i < N; i++) out[i] = i < lit ? col : Col{0, 0, 0};
+                  if (id(mic_is_muted)) out[P0] = Col{PILOT, PILOT * 0.5f, 0};  // amber pilot: mic off
+                  break;
+                }
+                case VOLUME: {  // share of lit LEDs = media player volume
+                  const float v = id(external_media_player).volume;
+                  const int lit = v <= 0.0f ? 0 : std::max(1, static_cast<int>(lroundf(v * N)));
+                  for (int i = 0; i < N; i++) out[i] = i < lit ? col : Col{0, 0, 0};
+                  break;
+                }
+              }
+            };
+
+            // ---- a scene change: choose the transition, starting from what is showing ----
+            const uint32_t now = millis();
+            const int req = id(led_scene);
+            const Col req_col{id(led_ring_color_r), id(led_ring_color_g), id(led_ring_color_b)};
+            const bool col_changed = fabsf(req_col.r - col.r) + fabsf(req_col.g - col.g) + fabsf(req_col.b - col.b) > 0.01f;
+            if (initial_run) {
+              for (int i = 0; i < N; i++) from[i] = Col{0, 0, 0};
+              scene = req; col = req_col; t0 = live0 = now; phase = 0;
+              choreo = req == FLASH ? NONE : XFADE;
+            } else if (req != scene || col_changed) {
+              const int prev = scene;
+              const float prev_tau = ms_since(now, live0);
+              for (int i = 0; i < N; i++) from[i] = frame[i];
+              prev_col = col;
+              choreo = XFADE; t0 = live0 = now; phase = 0;
+              if (req == prev) {
+                choreo = XFADE;                                   // colour change only
+              } else if (req == FLASH) {
+                choreo = NONE;                                    // mute/unmute flash: at once
+              } else if (prev == IDLE && req == RING) {
+                choreo = FILL;
+              } else if (prev == BREATHE_FAST && req == SPIN) {
+                choreo = GATHER;
+              } else if (prev == SPIN && req == BREATHE_SLOW) {
+                choreo = TO_PULSE;
+                spoke_pos = floorf(prev_tau / CSTEP);             // where the head is
+              } else if (prev == BREATHE_SLOW && req == BREATHE_FAST) {
+                choreo = NONE;                                    // same pulse, faster, phase kept
+                phase = fmodf(prev_tau, 2400.0f) / 2400.0f * 1200.0f;
+              } else if (prev == SPIN && req == IDLE) {
+                choreo = SPIN_TO_IDLE;
+                spoke_pos = floorf(prev_tau / CSTEP);             // head: clockwise steps from the pilot
+                const int m = ((static_cast<int>(spoke_pos) % N) + N) % N;
+                dist = m == 0 ? 0 : N - m;                        // steps on to the pilot
+                end = (dist + TAIL) * CSTEP;                      // run in, then the tail shrinks into the head
+              } else if (req == IDLE) {
+                choreo = EMPTY;
+              }
+              scene = req; col = req_col;
             }
-            const float total = std::max(t.total_seconds, static_cast<uint32_t>(1));
-            const float left = std::max(t.seconds_left - std::min((millis() - last_ms) / 1000.0f, 1.0f), 0.0f);
-            const int n = ${led_num};
-            const int lit = std::min(n, static_cast<int>(std::ceil(n * left / total - 0.001f)));
-            for (int i = 0; i < n; i++)
-              it[i] = i < lit ? current_color : Color::BLACK;
-            if (id(mic_is_muted)) it[${pilot_led}] = Color(255, 128, 0) * ${pilot_dim};  // amber: mic off
-      # Breathing pulses: brightness swings smoothly (raised cosine) between
-      # 50 % and 100 % of the ring brightness, so they follow the LED ring
-      # brightness and night mode (ESPHome's pulse effect uses absolute
-      # brightness). Full cycle 2.4 s or 1.2 s.
-      - addressable_lambda:
-          name: "Breathe 2.4s"
-          update_interval: 20ms
-          lambda: |-
-            const float t = (millis() % 2400) / 2400.0f;
-            const float f = 0.75f - 0.25f * cosf(2.0f * static_cast<float>(M_PI) * t);  // 0.5 .. 1.0
-            it.all() = current_color * static_cast<uint8_t>(255.0f * f);
-      - addressable_lambda:
-          name: "Breathe 1.2s"
-          update_interval: 20ms
-          lambda: |-
-            const float t = (millis() % 1200) / 1200.0f;
-            const float f = 0.75f - 0.25f * cosf(2.0f * static_cast<float>(M_PI) * t);  // 0.5 .. 1.0
-            it.all() = current_color * static_cast<uint8_t>(255.0f * f);
+
+            // ---- draw ----
+            Col out[N];
+            const float t = ms_since(now, t0);
+            switch (choreo) {
+              case FILL: {  // fill clockwise from the pilot, one LED per step; colour on the way
+                const float tf = N * STEP, head = t / STEP;
+                const Col c = mix(hue(from[P0], col), col, smooth(t / tf));
+                for (int k = 0; k < N; k++) out[cw(P0, k)] = mix(from[cw(P0, k)], c, clampf(head - k, 0, 1));
+                if (t >= tf) { choreo = NONE; live0 = t0 + static_cast<uint32_t>(tf); }
+                break;
+              }
+              case GATHER: {  // the comet enters one step after the pilot and sweeps once round,
+                              // gathering the pulse; at the pilot it simply spins on
+                const float tg = (N - 1) * CSTEP, a = smooth(t / tg);
+                const int js = static_cast<int>(floorf(t / CSTEP));  // the head is LED js of the sweep
+                Col cf[N];
+                comet(cw(P0, js - (N - 1)), col, 1, TAIL, cf);
+                Col pulse_hue = prev_col;
+                for (int i = 0; i < N; i++) if (level(from[i]) > 0.001f) { pulse_hue = hue(from[i], prev_col); break; }
+                const Col head_col = mix(pulse_hue, col, a);
+                for (int j = 0; j < N; j++) {
+                  const int led = cw(P0, j - (N - 1));            // sweep order: P0+1 ... P0
+                  out[led] = j > js ? recolour(from[led], col, a) : j == js ? head_col : cf[led];
+                }
+                if (t >= tg) { choreo = NONE; live0 = t0 + static_cast<uint32_t>(tg); }
+                break;
+              }
+              case TO_PULSE: {  // the head sweeps on once round at the comet's speed, filling everything it passes
+                const float tf = (N - 1) * CSTEP;
+                const int h0 = cw(P0, static_cast<int>(spoke_pos)), moved = static_cast<int>(floorf(t / CSTEP));
+                comet(h0, col, 1, TAIL, out);
+                for (int j = 0; j <= std::min(moved, N - 1); j++) out[cw(h0, j)] = col;
+                if (t >= tf) { choreo = NONE; live0 = t0 + static_cast<uint32_t>(tf); }
+                break;
+              }
+              case EMPTY: {  // empty clockwise into the pilot, one LED per step; colour to the pilot's
+                const float te = (N - 1) * STEP, head = t / STEP, a = smooth(t / te);
+                for (int k = 0; k < N - 1; k++) {
+                  const int led = cw(P0, k + 1);
+                  out[led] = mix(recolour(from[led], col, a), Col{0, 0, 0}, clampf(head - k, 0, 1));
+                }
+                out[P0] = mix(from[P0], scale(col, PILOT), a);
+                if (t >= te) { choreo = NONE; live0 = t0 + static_cast<uint32_t>(te); }
+                break;
+              }
+              case SPIN_TO_IDLE: {  // the comet runs on into the pilot; the head stops there and the tail
+                                    // shrinks into it; the dim ring fades, the colour turns to the pilot's
+                if (t < end) {
+                  const float a = smooth(t / end), run_in = dist * CSTEP;
+                  const int moved = std::min(static_cast<int>(dist), static_cast<int>(floorf(t / CSTEP)));
+                  const int len = t < run_in ? TAIL : static_cast<int>(lroundf(TAIL * (1 - (t - run_in) / (TAIL * CSTEP))));
+                  comet(cw(P0, static_cast<int>(spoke_pos) + moved), mix(prev_col, col, a), 1 - a, len, out);
+                } else {
+                  for (int i = 0; i < N; i++) out[i] = Col{0, 0, 0};
+                  out[P0] = mix(col, scale(col, PILOT), smooth((t - end) / D));
+                  if (t - end >= D) { choreo = NONE; live0 = now; }
+                }
+                break;
+              }
+              case XFADE: {
+                Col target[N];
+                live(scene, t, target);
+                const float a = smooth(t / D);
+                for (int i = 0; i < N; i++) out[i] = mix(from[i], target[i], a);
+                if (t >= D) choreo = NONE;   // live0 = t0: the live scene carries on from here
+                break;
+              }
+              default: live(scene, ms_since(now, live0), out);
+            }
+
+            // ---- output: the light applies the ring brightness (current_color) and the gamma ----
+            const float b = std::max(current_color.r, std::max(current_color.g, current_color.b)) / 255.0f;
+            for (int i = 0; i < N; i++) {
+              frame[i] = out[i];
+              it[i] = Color(static_cast<uint8_t>(clampf(out[i].r * b, 0, 1) * 255.0f + 0.5f),
+                            static_cast<uint8_t>(clampf(out[i].g * b, 0, 1) * 255.0f + 0.5f),
+                            static_cast<uint8_t>(clampf(out[i].b * b, 0, 1) * 255.0f + 0.5f));
+            }
+      # Boot / initialisation
       - addressable_rainbow:
           name: "Rainbow Slow"
           speed: 4
           width: 7
-      # Thinking: two spokes opposite each other gliding clockwise (seen
-      # from the speaker side, i.e. falling LED index) in the light's colour
-      # (warm white). Each spoke cross-fades between neighbouring LEDs; levels are
-      # gamma-compensated (strip gamma 2.8) so the fade looks even. Position is
-      # computed from the time, so the speed holds even when updates are late.
-      # One LED per 250 ms, full level.
-      - addressable_lambda:
-          name: "Rotate Slow"
-          update_interval: 20ms
-          lambda: |-
-            const int n = ${led_num};
-            // whole-number remainder first: a float of the raw millis() loses precision after hours
-            const float pos = fmodf(n - (millis() % (250u * n)) / 250.0f, n);  // clockwise
-            for (int i = 0; i < n; i++) {
-              float v = 0.0f;
-              for (float off : {0.0f, n / 2.0f}) {
-                float d = fabsf(i - fmodf(pos + off, n));
-                d = std::min(d, n - d);
-                v = std::max(v, 1.0f - d);
-              }
-              // cross-fade compensated for the light's gamma 2.8, so the glide looks even
-              it[i] = current_color * static_cast<uint8_t>(255.0f * powf(std::max(v, 0.0f), 1.0f / 2.8f));  // full level
-            }
-      # Volume level: the share of lit LEDs is the media player volume (at
-      # least one LED unless the volume is 0)
-      - addressable_lambda:
-          name: "Volume Level"
-          update_interval: 100ms
-          lambda: |-
-            const int n = ${led_num};
-            const float v = id(external_media_player).volume;
-            const int lit = v <= 0.0f ? 0 : std::max(1, static_cast<int>(lroundf(v * n)));
-            for (int i = 0; i < n; i++)
-              it[i] = i < lit ? current_color : Color::BLACK;
 
 external_components:
   # Backup fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus one commit that
@@ -385,7 +588,7 @@ external_components:
   # the n-IA-hane/esp-gmf fork. Pinned by commit.
   - source: github://rgitha/esphome-audio-stack@487db8fd33a41ba2c0b48f8abeb9df5a276c3d68
     components: [esp_audio_stack, esp_afe]
-  # v0.4.2 (in development, main), pinned by commit
+  # v0.4.2, pinned by commit
   - source: github://rgitha/esphome-adaptive-volume@3b2d16738f9178176894e03e9d11f47990ce33de
     components: [adaptive_volume]
   # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
@@ -964,6 +1167,18 @@ voice_assistant:
         // LED updates are handled centrally by control_leds()
 
 globals:
+  - id: led_scene  # requested LED scene (see the Scene effect)
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: led_scene_running  # the Scene effect is the light's effect
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: ota_last_lit
+    type: int
+    restore_value: no
+    initial_value: '0'
   - id: mic_is_muted
     type: bool
     restore_value: yes
@@ -1071,23 +1286,23 @@ script:
                 id: led_ring_brightness
                 value: !lambda return id(day_led_brightness);
 
-  # Short flash of the ring: red = microphone muted, green = unmuted
+  # Short flash of the ring: amber = microphone muted, white = unmuted
   - id: flash_ring
     parameters:
       muted: bool
     then:
-      - light.turn_on:
-          id: status_ring
-          # mute: amber, unmute: white (then the pilot in the same colour)
-          red: 1.0
-          green: !lambda 'return muted ? 0.5f : 1.0f;'
-          blue: !lambda 'return muted ? 0.0f : 1.0f;'
-          brightness: 100%
-          effect: None # full ring (without it the running Pilot effect stays)
+      # mute: amber, unmute: white, at once; then it empties into the pilot in the same colour
+      - script.execute:
+          id: led_set_effect
+          effect: "Flash"
+          r: 1.0
+          g: !lambda 'return muted ? 0.5f : 1.0f;'
+          b: !lambda 'return muted ? 0.0f : 1.0f;'
       - delay: 250ms
       - script.execute: control_leds # back to the pilot light (red while muted)
 
-  # Minimal dispatcher for LEDs: off / solid / built-in effects
+  # LED dispatcher: maps a state name to a scene of the Scene effect (which moves
+  # between scenes itself), or to the boot rainbow, or off
   - id: led_set_effect
     mode: restart
     parameters:
@@ -1100,17 +1315,28 @@ script:
           id(led_ring_color_r) = r;
           id(led_ring_color_g) = g;
           id(led_ring_color_b) = b;
-          ESP_LOGI("led", "led_set_effect: effect='%s' rgb(%.2f, %.2f, %.2f) brightness=%.2f",
-                   effect.c_str(), r, g, b, (float) id(led_ring_brightness).state);
+          // scene numbers as in the Scene effect
+          static const struct { const char *name; int scene; } MAP[] = {
+              {"Pilot", 0}, {"Ring", 1}, {"solid", 1}, {"Flash", 2}, {"Breathe 2.4s", 3},
+              {"Breathe 1.2s", 4}, {"Spin", 5}, {"Timer Tick", 6}, {"Volume Level", 7}};
+          int scene = -1;
+          for (const auto &m : MAP)
+            if (effect == m.name) scene = m.scene;
+          if (scene >= 0) id(led_scene) = scene;
+          ESP_LOGI("led", "led_set_effect: effect='%s' scene=%d rgb(%.2f, %.2f, %.2f) brightness=%.2f",
+                   effect.c_str(), scene, r, g, b, (float) id(led_ring_brightness).state);
       - if:
           condition:
             lambda: 'return effect == "off";'
           then:
-            - light.turn_off: status_ring
+            - light.turn_off:
+                id: status_ring
+                transition_length: 0s
+            - lambda: id(led_scene_running) = false;
           else:
             - if:
                 condition:
-                  lambda: 'return effect == "solid";'
+                  lambda: 'return effect == "Rainbow Slow";'
                 then:
                   - light.turn_on:
                       id: status_ring
@@ -1118,15 +1344,22 @@ script:
                       red: !lambda 'return id(led_ring_color_r);'
                       green: !lambda 'return id(led_ring_color_g);'
                       blue: !lambda 'return id(led_ring_color_b);'
-                      effect: None # full ring: clear any running effect (Pilot)
+                      effect: "Rainbow Slow"
+                  - lambda: id(led_scene_running) = false;
                 else:
-                  - light.turn_on:
-                      id: status_ring
-                      brightness: !lambda 'return id(led_ring_brightness).state;'
-                      red: !lambda 'return id(led_ring_color_r);'
-                      green: !lambda 'return id(led_ring_color_g);'
-                      blue: !lambda 'return id(led_ring_color_b);'
-                      effect: !lambda 'return effect;'
+                  # the Scene effect picks up led_scene; start it only when it is not running
+                  - if:
+                      condition:
+                        lambda: return !id(led_scene_running);
+                      then:
+                        - light.turn_on:
+                            id: status_ring
+                            brightness: !lambda 'return id(led_ring_brightness).state;'
+                            red: 1.0  # white: the Scene effect sets the colours
+                            green: 1.0
+                            blue: 1.0
+                            effect: "Scene"
+                        - lambda: id(led_scene_running) = true;
 
   # Single LED state machine (small footprint)
   - id: control_leds
@@ -1182,7 +1415,7 @@ script:
               set("Breathe 1.2s", 0.55, 0.0, 1.0);  // violet pulse: HA hears your voice
               return;
             case ${voice_assist_thinking_phase_id}:
-              set("Rotate Slow", 1.0, 0.70, 0.35);  // warm white (~3000 K), slow spin
+              set("Spin", 1.0, 0.70, 0.35);  // warm white (~3000 K), two spokes clockwise
               return;
             case ${voice_assist_reply_pending_phase_id}:
               set("Breathe 2.4s", 1.0, 0.70, 0.35);  // warm white (~3000 K), slow pulse: reply coming
@@ -1214,13 +1447,12 @@ script:
   - id: control_leds_volume_changed
     mode: restart
     then:
-      - light.turn_on:
-          id: status_ring
-          brightness: !lambda 'return id(led_ring_brightness).state;'
-          red: 1.0
-          green: 1.0
-          blue: 1.0
+      - script.execute:
+          id: led_set_effect
           effect: "Volume Level"
+          r: 1.0
+          g: 1.0
+          b: 1.0
       - lambda: |-
           ESP_LOGD("led", "volume_changed: level %.0f %%", id(external_media_player).volume * 100.0f);
       - delay: 1.2s

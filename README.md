@@ -82,7 +82,7 @@ Blue or violet means the microphone is streaming to HA; nothing else uses blue.
 |---|---|
 | Idle | Pilot LED dim white; dim amber when the mic is muted |
 | Woken / HA hears your voice | Steady blue / violet pulse |
-| Thinking | Warm white, two spokes spinning slowly clockwise |
+| Thinking | Warm white comet spinning clockwise: full head, tail fading round the ring |
 | Reply coming / replying | Warm white slow pulse / faster pulse |
 | Timer running / ringing | White countdown / white pulse |
 | Volume change | White, number of LEDs = volume level |
@@ -90,7 +90,10 @@ Blue or violet means the microphone is streaming to HA; nothing else uses blue.
 | Error, not ready, HA disconnected | Steady red |
 | Wi-Fi provisioning | White slow pulse |
 | Booting | Rainbow |
+| Firmware update | Green: dim ring, bright fill growing clockwise; red on failure |
 
+States flow into each other with clockwise motion (fills, the spin, emptying into
+the pilot) and colour blends in linear light; `led_transition_ms` sets the pace.
 Night mode caps the LED brightness only.
 
 **Pinned sources.** All external code and files are pinned to commits or
