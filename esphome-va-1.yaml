@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.3"
+  fw_version: "2026.11.18.4"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -588,8 +588,8 @@ external_components:
   # the n-IA-hane/esp-gmf fork. Pinned by commit.
   - source: github://rgitha/esphome-audio-stack@487db8fd33a41ba2c0b48f8abeb9df5a276c3d68
     components: [esp_audio_stack, esp_afe]
-  # v0.4.2, pinned by commit
-  - source: github://rgitha/esphome-adaptive-volume@3b2d16738f9178176894e03e9d11f47990ce33de
+  # v0.4.3, pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@dd7a8f72891f5373fa9a54cd6279b8fee920751b
     components: [adaptive_volume]
   # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
   # repository's components/ at repo_ref

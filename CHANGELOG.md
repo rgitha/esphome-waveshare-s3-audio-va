@@ -4,6 +4,10 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.18
 
+- **.4** adaptive_volume v0.4.3: room noise is the median of 0.5 s block averages
+  over 8 s (was the 3rd-largest block peak, capped by a 4.5 s hold), so short sounds
+  and occasional talk no longer raise it; sustained sound still does. Smoothing
+  unchanged.
 - **.3** Thinking: a comet over the whole ring (full head, tail fading in linear
   light), once round in 2 x `led_transition_ms` (250). From the pulse it sweeps in
   gathering it; into the reply pulse its head sweeps once round filling the ring; to
