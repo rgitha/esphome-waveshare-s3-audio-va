@@ -57,7 +57,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 677800192b809e5be933630630ed8861a6eff147
+  repo_ref: 43cf4004ce6c9d4287490f7f1a45fed736d8e1d0
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -265,6 +265,8 @@ ota:
             id: mww
         - micro_wake_word.stop:
             id: mww_b
+        - micro_wake_word.stop:
+            id: mww_c
         - voice_assistant.stop:
         - media_player.stop:
             id: external_media_player
@@ -320,6 +322,8 @@ ota:
             id: mww
         - micro_wake_word.start:
             id: mww_b
+        - micro_wake_word.start:
+            id: mww_c
         - script.execute: control_leds
 
 i2c:
@@ -893,9 +897,11 @@ media_player:
 
 micro_wake_word:
   # TEST (dual wake word): one instance per separated (BSS) stream, each with all
-  # models. mww follows Home Assistant's wake word choice; mww_b copies mww's
-  # enabled wake words and cutoffs (interval below). Both hand detections to the
-  # on_wake script, which acts on the first and logs both.
+  # models, plus (test only) one on the unseparated output for comparison. mww
+  # follows Home Assistant's wake word choice; mww_b and mww_c copy mww's enabled
+  # wake words and cutoffs (interval below). Detections go to the on_wake script,
+  # which acts on the first; every detection or VAD veto also produces one
+  # comparison line with each stream's peak probability (compare_streams).
   - id: mww
     # Larger audio buffer to absorb brief inference delays (default 120 ms).
     # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
@@ -928,6 +934,11 @@ micro_wake_word:
           id: on_wake
           wake_word: !lambda return wake_word;
           stream: 0
+    on_vad_blocked:
+      - script.execute:
+          id: compare_streams
+          wake_word: !lambda return wake_word;
+          trigger: "VAD veto on raw 0"
   - id: mww_b
     # Larger audio buffer to absorb brief inference delays (default 120 ms).
     # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
@@ -960,6 +971,49 @@ micro_wake_word:
           id: on_wake
           wake_word: !lambda return wake_word;
           stream: 1
+    on_vad_blocked:
+      - script.execute:
+          id: compare_streams
+          wake_word: !lambda return wake_word;
+          trigger: "VAD veto on raw 1"
+
+  - id: mww_c # TEST ONLY: the unseparated output, for comparison; remove for production
+    # Larger audio buffer to absorb brief inference delays (default 120 ms).
+    # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
+    # merged to dev 2026-10-18; not in 2026.9 / 2026.10).
+    # ring_buffer_duration: 800ms
+    microphone:
+      id: mww_c_mic
+      microphone: afe_mic # TEST ONLY: unseparated output (what production used until now)
+      gain_factor: 1 # digital gain; use the Mic Gain trim instead
+    task_stack_in_psram: true
+    stop_after_detection: false
+    models:
+      - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+        id: okay_nabu_c
+      #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      #  id: kenobi
+      - model: ${mww_models_url}/hey_jarvis.json
+        id: hey_jarvis_c
+      #- model: hey_mycroft
+      #  id: hey_mycroft
+      - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
+        id: stop_c
+        internal: true
+        probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+    vad:
+      model: ${mww_models_url}/vad.json
+      probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
+    on_wake_word_detected:
+      - script.execute:
+          id: on_wake
+          wake_word: !lambda return wake_word;
+          stream: 2
+    on_vad_blocked:
+      - script.execute:
+          id: compare_streams
+          wake_word: !lambda return wake_word;
+          trigger: "VAD veto on output"
 
 voice_assistant:
   id: va
@@ -1006,6 +1060,8 @@ voice_assistant:
         id: mww
     - micro_wake_word.start:
         id: mww_b
+    - micro_wake_word.start:
+        id: mww_c
     - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
     - script.execute: control_leds
   on_client_disconnected:
@@ -1200,6 +1256,19 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  - id: wake_first_stream
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # TEST: comparison line already pending / this call is a repeat
+  - id: compare_busy
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: compare_skip
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   - id: led_scene  # requested LED scene (see the Scene effect)
     type: int
     restore_value: no
@@ -1286,9 +1355,48 @@ globals:
     initial_value: '0'
 
 script:
-  # TEST (dual wake word): wake word detected on stream 0 (raw 0) or 1 (raw 1). The
-  # first detection acts (the actions are the former on_wake_word_detected); one on
-  # the other stream within 1.5 s is the same utterance and is only logged.
+  # TEST (dual wake word): wake word detected on stream 0 (raw 0), 1 (raw 1) or
+  # 2 (output, test only). The first detection acts (the actions are the former
+  # on_wake_word_detected); one on another stream within 1.5 s is the same
+  # utterance and is only logged.
+  # TEST: one line per wake word event (detection or VAD veto on any stream), 1 s
+  # after the first, with each stream's peak sliding-average probability over the
+  # last ~2 s for that wake word, and whether it fired or was vetoed by VAD.
+  - id: compare_streams
+    mode: parallel
+    max_runs: 8
+    parameters:
+      wake_word: string
+      trigger: string
+    then:
+      - lambda: |-
+          id(compare_skip) = id(compare_busy);
+          id(compare_busy) = true;
+      - if:
+          condition:
+            lambda: return !id(compare_skip);
+          then:
+            - delay: 1s
+            - lambda: |-
+                id(compare_busy) = false;
+                const uint32_t now = millis();
+                micro_wake_word::MicroWakeWord *inst[3] = {id(mww), id(mww_b), id(mww_c)};
+                static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
+                std::string line;
+                for (int k = 0; k < 3; k++) {
+                  for (auto *m : inst[k]->get_wake_words()) {
+                    if (m->get_wake_word() != wake_word)
+                      continue;
+                    const uint32_t d = m->get_last_detected_ms(), v = m->get_last_vetoed_ms();
+                    const bool fired = d != 0 && now - d < 2500;
+                    const bool vetoed = !fired && v != 0 && now - v < 2500;
+                    char buf[48];
+                    snprintf(buf, sizeof(buf), "%s%s %.2f%s", k ? " | " : "", NAMES[k], m->get_recent_peak() / 255.0f,
+                             fired ? " fired" : (vetoed ? " vad-veto" : ""));
+                    line += buf;
+                  }
+                }
+                ESP_LOGI("dual_mww", "Compare '%s' (%s): %s", wake_word.c_str(), trigger.c_str(), line.c_str());
   - id: on_wake
     mode: parallel
     max_runs: 4
@@ -1297,15 +1405,28 @@ script:
       stream: int
     then:
       - lambda: |-
+          static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
+          const char *name = (stream >= 0 && stream <= 2) ? NAMES[stream] : "?";
           const uint32_t now = millis();
           id(wake_repeat) = now - id(last_wake_ms) < 1500;
           if (id(wake_repeat)) {
-            ESP_LOGI("dual_mww", "Wake word '%s' also on raw %d, %u ms later (ignored)", wake_word.c_str(), stream,
+            ESP_LOGI("dual_mww", "Wake word '%s' also on %s, %u ms later (ignored)", wake_word.c_str(), name,
                      (unsigned) (now - id(last_wake_ms)));
           } else {
-            ESP_LOGI("dual_mww", "Wake word '%s' on raw %d", wake_word.c_str(), stream);
+            ESP_LOGI("dual_mww", "Wake word '%s' on %s", wake_word.c_str(), name);
             id(last_wake_ms) = now;
+            id(wake_first_stream) = stream;
           }
+      - if:
+          condition:
+            lambda: return !id(wake_repeat);
+          then:
+            - script.execute:
+                id: compare_streams
+                wake_word: !lambda return wake_word;
+                trigger: !lambda |-
+                  static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
+                  return std::string("acted on ") + NAMES[id(wake_first_stream)];
       - if:
           condition:
             lambda: return !id(wake_repeat);
@@ -1667,6 +1788,7 @@ script:
                 then:
                   - micro_wake_word.enable_model: stop
                   - micro_wake_word.enable_model: stop_b
+                  - micro_wake_word.enable_model: stop_c
             - wait_until:
                 condition:
                   lambda: |-
@@ -1680,6 +1802,7 @@ script:
                 then:
                   - micro_wake_word.disable_model: stop
                   - micro_wake_word.disable_model: stop_b
+                  - micro_wake_word.disable_model: stop_c
 
   # Alarm handling
   - id: check_alarm
@@ -1896,6 +2019,7 @@ switch:
     on_turn_off:
       - micro_wake_word.disable_model: stop
       - micro_wake_word.disable_model: stop_b
+      - micro_wake_word.disable_model: stop_c
       - script.execute: disable_repeat
       - if:
           condition:
@@ -1916,6 +2040,7 @@ switch:
           duration: 0.0s
       - micro_wake_word.enable_model: stop
       - micro_wake_word.enable_model: stop_b
+      - micro_wake_word.enable_model: stop_c
       - script.execute: ring_timer
       - script.execute: control_leds
       - delay: 2min
@@ -2248,23 +2373,25 @@ binary_sensor:
 
 # TEST (dual wake word)
 interval:
-  # mww_b follows mww: the wake words Home Assistant enabled, and the cutoffs set by
-  # the Wake word sensitivity select (stop is switched on both directly)
+  # mww_b and mww_c follow mww: the wake words Home Assistant enabled, and the cutoffs
+  # set by the Wake word sensitivity select (stop is switched on all directly)
   - interval: 1s
     then:
       - lambda: |-
           auto a = id(mww).get_wake_words();
-          auto b = id(mww_b).get_wake_words();
-          for (size_t i = 0; i < a.size() && i < b.size(); i++) {
-            if (a[i]->is_enabled() != b[i]->is_enabled()) {
-              if (a[i]->is_enabled()) {
-                b[i]->enable();
-              } else {
-                b[i]->disable();
+          for (auto *other : {id(mww_b), id(mww_c)}) {
+            auto b = other->get_wake_words();
+            for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+              if (a[i]->is_enabled() != b[i]->is_enabled()) {
+                if (a[i]->is_enabled()) {
+                  b[i]->enable();
+                } else {
+                  b[i]->disable();
+                }
               }
+              if (b[i]->get_probability_cutoff() != a[i]->get_probability_cutoff())
+                b[i]->set_probability_cutoff(a[i]->get_probability_cutoff());
             }
-            if (b[i]->get_probability_cutoff() != a[i]->get_probability_cutoff())
-              b[i]->set_probability_cutoff(a[i]->get_probability_cutoff());
           }
 
   # CPU per task and per core over the last 60 s (FreeRTOS run-time statistics).

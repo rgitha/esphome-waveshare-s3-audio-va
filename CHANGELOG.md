@@ -7,8 +7,10 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 - **.5** (TEST, branch dual-mww) Wake word on both separated (BSS) streams: one
   micro_wake_word instance on raw 0 and one on raw 1 (patched copy allowing two
   instances; raw streams from the audio stack fork's dual-mww branch), each with
-  Okay Nabu, Hey Jarvis, stop and the VAD model. The first detection acts, the
-  other is logged. The voice assistant still streams the unseparated output. CPU
+  Okay Nabu, Hey Jarvis, stop and the VAD model, plus (test only) a third on the
+  unseparated output for comparison. The first detection acts, the others are
+  logged; every detection or VAD veto gives one comparison line with each stream's
+  peak probability. The voice assistant still streams the unseparated output. CPU
   statistics per task and core every 60 s (temporary).
 - **.4** adaptive_volume v0.4.3: room noise is the median of 0.5 s block averages
   over 8 s (was the 3rd-largest block peak, capped by a 4.5 s hold), so short sounds
