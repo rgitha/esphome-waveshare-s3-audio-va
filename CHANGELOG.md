@@ -4,6 +4,9 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.18
 
+- **.11** (TEST, branch dual-mww) The wake word instance switches are remembered
+  across reboots (the output instance starts off), and the automatic starts (Home
+  Assistant connected, OTA error) only start instances whose switch is on.
 - **.10** (TEST, branch dual-mww) AFE mode low_cost at start (echo cancellation
   as effective, less CPU during playback, less internal RAM); micro_wake_word audio
   buffer 500 ms (new ring_buffer_duration option in the local copy); CPU statistics:

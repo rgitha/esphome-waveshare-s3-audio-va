@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.10"
+  fw_version: "2026.11.18.11"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -320,12 +320,25 @@ ota:
             g: 0.0
             b: 0.0
         - delay: 3s
-        - micro_wake_word.start:
-            id: mww
-        - micro_wake_word.start:
-            id: mww_b
-        - micro_wake_word.start:
-            id: mww_c
+        # TEST: only the wake word instances whose switch is on
+        - if:
+            condition:
+              switch.is_on: mww_raw0_switch
+            then:
+              - micro_wake_word.start:
+                  id: mww
+        - if:
+            condition:
+              switch.is_on: mww_raw1_switch
+            then:
+              - micro_wake_word.start:
+                  id: mww_b
+        - if:
+            condition:
+              switch.is_on: mww_output_switch
+            then:
+              - micro_wake_word.start:
+                  id: mww_c
         - script.execute: control_leds
 
 i2c:
@@ -1070,12 +1083,25 @@ voice_assistant:
               priority: false
               sound_file: "boot_sound"
     - lambda: id(init_in_progress) = false;
-    - micro_wake_word.start:
-        id: mww
-    - micro_wake_word.start:
-        id: mww_b
-    - micro_wake_word.start:
-        id: mww_c
+    # TEST: only the wake word instances whose switch is on
+    - if:
+        condition:
+          switch.is_on: mww_raw0_switch
+        then:
+          - micro_wake_word.start:
+              id: mww
+    - if:
+        condition:
+          switch.is_on: mww_raw1_switch
+        then:
+          - micro_wake_word.start:
+              id: mww_b
+    - if:
+        condition:
+          switch.is_on: mww_output_switch
+        then:
+          - micro_wake_word.start:
+              id: mww_c
     - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
     - script.execute: control_leds
   on_client_disconnected:
@@ -1961,17 +1987,24 @@ switch:
       restore_mode: ALWAYS_ON
       entity_category: config
 
-  # TEST: each wake word instance on/off, to read its CPU cost. A reconnect to Home
-  # Assistant or an OTA error starts all three again.
+  # TEST: each wake word instance on/off (remembered across reboots; the output
+  # instance starts off). Automatic starts (Home Assistant connected, OTA error) only
+  # start the instances whose switch is on.
   - platform: template
     id: mww_raw0_switch
     name: "Wake word on raw 0 (test)"
     entity_category: config
     optimistic: true
-    restore_mode: ALWAYS_ON
+    restore_mode: RESTORE_DEFAULT_ON
     turn_on_action:
-      - micro_wake_word.start:
-          id: mww
+      # not before Home Assistant is connected (also skips the restore at boot;
+      # on_client_connected starts it then)
+      - if:
+          condition:
+            api.connected:
+          then:
+            - micro_wake_word.start:
+                id: mww
     turn_off_action:
       - micro_wake_word.stop:
           id: mww
@@ -1980,10 +2013,16 @@ switch:
     name: "Wake word on raw 1 (test)"
     entity_category: config
     optimistic: true
-    restore_mode: ALWAYS_ON
+    restore_mode: RESTORE_DEFAULT_ON
     turn_on_action:
-      - micro_wake_word.start:
-          id: mww_b
+      # not before Home Assistant is connected (also skips the restore at boot;
+      # on_client_connected starts it then)
+      - if:
+          condition:
+            api.connected:
+          then:
+            - micro_wake_word.start:
+                id: mww_b
     turn_off_action:
       - micro_wake_word.stop:
           id: mww_b
@@ -1992,10 +2031,16 @@ switch:
     name: "Wake word on output (test)"
     entity_category: config
     optimistic: true
-    restore_mode: ALWAYS_ON
+    restore_mode: RESTORE_DEFAULT_OFF
     turn_on_action:
-      - micro_wake_word.start:
-          id: mww_c
+      # not before Home Assistant is connected (also skips the restore at boot;
+      # on_client_connected starts it then)
+      - if:
+          condition:
+            api.connected:
+          then:
+            - micro_wake_word.start:
+                id: mww_c
     turn_off_action:
       - micro_wake_word.stop:
           id: mww_c
