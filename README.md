@@ -109,6 +109,6 @@ Reported every 5 min as the median of 10 readings.
 
 ## License
 
-MIT, except the C++ files of `components/voice_assistant`: they are a copy of
-ESPHome's voice_assistant component with local changes and stay under GPLv3, as
-in ESPHome. See [LICENSE](LICENSE).
+MIT, except the C++ files of `components/voice_assistant` and
+`components/micro_wake_word`: they are copies of ESPHome's components with local
+changes and stay under GPLv3, as in ESPHome. See [LICENSE](LICENSE).
