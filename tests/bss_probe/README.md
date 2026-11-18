@@ -82,19 +82,25 @@ Test sound level by stream; echo cancellation off, then on:
 Caveats: broadband noise from the board's own speaker, close to both mics; speech
 or music, or a source at a distance, may behave differently. One recording each way.
 
-### Why BSS can separate the speaker although it sits above both mics
+### Why BSS can separate the speaker (open, not established)
 
-BSS needs no direction in the usual sense: per frequency it learns weights for the
-two mics that cancel one source, which works for any source whose sound reaches the
-two mics with a different level / phase relationship from the other sources. The
-speaker is the easiest source of all for that: it never moves, so its relationship
-is fixed. Even right above both mics, the two mics are not at exactly the same
-acoustic distance from the cone and see the enclosure and their ports differently,
-which gives the speaker a signature of its own; a person across the room has a
-different one. The limit is a source with the same relationship (a talker on the
-plane where the speaker's relationship looks alike), which the speaker null would
-also suppress; and the parts of the speaker's output that are not linear (distortion,
-rattle) do not follow one fixed relationship and are left over.
+Measured: with echo cancellation off, raw 1 holds about 21 dB less of the speaker
+than raw 0 (heard the same way). Why is not known: Espressif's BSS is a closed
+binary, its algorithm is not documented, and nothing here was checked against it.
+
+What is known about the board: the two mics are exactly symmetrical with respect
+to the speaker and the enclosure, so a difference in distance or enclosure between
+the mics does not explain it.
+
+A candidate, from how frequency-domain separation works in general (assuming
+Espressif's BSS is of that kind): per frequency it learns two mic weights that
+cancel one source. A source that reaches both mics identically, as a symmetrically
+placed speaker should, is cancelled by the difference of the two mics; that leaves
+sources that reach the mics differently, such as a person off to one side. The same
+would cancel any other sound arriving identically at both mics (from the plane of
+symmetry), and anything that does not follow one fixed linear path (speaker
+distortion, rattle) would be left over. Unverified; not followed up for now (a
+one-mic comparison has too many variables).
 
 ## What follows for the voice firmware
 
