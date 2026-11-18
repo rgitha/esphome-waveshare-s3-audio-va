@@ -1,11 +1,12 @@
 #include "bss_probe.h"
 
 #include "esphome/components/audio/audio.h"
-#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <algorithm>
 #include <cmath>
@@ -23,8 +24,10 @@ void BssProbe::setup() {
   this->out_ = static_cast<int16_t *>(heap_caps_malloc(this->cap_ * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   this->raw_ = static_cast<int16_t *>(
       heap_caps_malloc(this->cap_ * MAX_RAW * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (this->out_ == nullptr || this->raw_ == nullptr) {
-    ESP_LOGE(TAG, "Cannot allocate %u bytes of PSRAM", static_cast<unsigned>(this->cap_ * (1 + MAX_RAW) * 2));
+  this->planar_buf_ = static_cast<int16_t *>(
+      heap_caps_malloc(this->cap_ * MAX_RAW * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->out_ == nullptr || this->raw_ == nullptr || this->planar_buf_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot allocate %u bytes of PSRAM", static_cast<unsigned>(this->cap_ * (1 + 2 * MAX_RAW) * 2));
     this->failed_ = true;
     this->mark_failed();
     return;
@@ -49,6 +52,12 @@ void BssProbe::tap_cb_(const esp_afe::EspAfe::ResultTap &tap, void *ctx) {
 }
 
 void BssProbe::on_tap_(const esp_afe::EspAfe::ResultTap &tap) {
+  // Lets key_record() wait for a frame in progress before it starts again
+  struct Guard {
+    std::atomic<int> &n;
+    explicit Guard(std::atomic<int> &c) : n(c) { n.fetch_add(1, std::memory_order_acq_rel); }
+    ~Guard() { n.fetch_sub(1, std::memory_order_acq_rel); }
+  } guard(this->in_tap_);
   if (!this->recording_.load(std::memory_order_acquire))
     return;
   const int n = tap.samples;
@@ -111,12 +120,19 @@ void BssProbe::loop() {
     // Keep the AFE running all the time, as in the voice firmware (BSS stays converged).
     this->mic_->start();
     this->mic_started_ = true;
-    ESP_LOGI(TAG, "Microphone started. Key 1 = record, Key 2 = play next stream, Key 3 = echo test on/off");
+    ESP_LOGI(TAG, "Microphone started. Key 2 = record, Key 1 = play next stream, Key 3 = echo test on/off");
   }
   if (this->rec_done_.exchange(false, std::memory_order_acq_rel)) {
-    this->analyse_();
     if (this->state_ == State::RECORDING)
       this->state_ = State::IDLE;
+    // Analyse in a task of its own, below the audio tasks, so the loop (LEDs, keys,
+    // speaker) carries on meanwhile.
+    this->analysing_.store(true, std::memory_order_release);
+    if (xTaskCreatePinnedToCore(&BssProbe::analysis_task_, "bss_analyse", 6144, this, 1, nullptr, 1) != pdPASS) {
+      ESP_LOGW(TAG, "Cannot start the analysis task; analysing here");
+      this->analyse_();
+      this->analysing_.store(false, std::memory_order_release);
+    }
   }
   this->feed_speaker_();
 }
@@ -128,9 +144,18 @@ void BssProbe::key_record() {
     ESP_LOGW(TAG, "Not ready yet");
     return;
   }
-  if (this->state_ == State::RECORDING)
+  if (this->analysing_.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Still analysing the last recording, press again in a moment");
     return;
-  if (this->play_stream_ != -2) {
+  }
+  const bool restart = this->state_ == State::RECORDING;
+  if (restart) {
+    // Discard the recording in progress: stop taking frames, wait for one in progress
+    this->recording_.store(false, std::memory_order_release);
+    for (int i = 0; i < 200 && this->in_tap_.load(std::memory_order_acquire) > 0; i++)
+      delayMicroseconds(100);
+  }
+  if (this->play_stream_ >= 0) {
     this->spk_->stop();
     this->play_stream_ = -2;
   }
@@ -140,24 +165,32 @@ void BssProbe::key_record() {
   std::fill(std::begin(this->trig_hist_), std::end(this->trig_hist_), 0u);
   this->trig_other_ = 0;
   this->rec_error_ = nullptr;
-  this->have_rec_ = false;
+  this->have_rec_.store(false, std::memory_order_release);
   this->sel_ = -1;
   this->pos_.store(0, std::memory_order_relaxed);
   this->rec_done_.store(false, std::memory_order_relaxed);
   this->state_ = State::RECORDING;
-  ESP_LOGI(TAG, "Recording %.1f s, echo test %s", this->record_seconds_, this->echo_test_ ? "ON" : "off");
+  ESP_LOGI(TAG, "Recording %.1f s%s, echo test %s", this->record_seconds_, restart ? " (started again)" : "",
+           this->echo_test_ ? "ON" : "off");
   this->recording_.store(true, std::memory_order_release);
   if (this->echo_test_) {
     this->play_stream_ = -1;
-    this->speaker_start_();
+    this->speaker_start_();  // test sound from the start (the speaker keeps running on a restart)
+  } else if (this->play_stream_ == -1) {
+    this->spk_->stop();
+    this->play_stream_ = -2;
   }
 }
 
 void BssProbe::key_play_next() {
   if (this->state_ == State::RECORDING)
     return;
-  if (!this->have_rec_) {
-    ESP_LOGW(TAG, "Nothing recorded yet (Key 1)");
+  if (this->analysing_.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Still analysing the last recording, press again in a moment");
+    return;
+  }
+  if (!this->have_rec_.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Nothing recorded yet (Key 2)");
     return;
   }
   this->sel_ = (this->sel_ + 1) % this->streams_;
@@ -186,11 +219,14 @@ const char *BssProbe::stream_name_(int stream, char *buf, size_t len) const {
 int16_t BssProbe::sample_(int stream, size_t i) const {
   if (stream == 0)
     return this->out_[i];
-  const int c = stream - 1;
-  const size_t fs = static_cast<size_t>(this->frame_samples_);
-  const size_t f = i / fs, j = i % fs;
-  const int16_t *block = this->raw_ + f * fs * this->raw_ch_;
-  return this->planar_ ? block[c * fs + j] : block[j * this->raw_ch_ + c];
+  return this->planar_buf_[static_cast<size_t>(stream - 1) * this->cap_ + i];
+}
+
+void BssProbe::analysis_task_(void *arg) {
+  auto *self = static_cast<BssProbe *>(arg);
+  self->analyse_();
+  self->analysing_.store(false, std::memory_order_release);
+  vTaskDelete(nullptr);
 }
 
 void BssProbe::analyse_() {
@@ -230,7 +266,7 @@ void BssProbe::analyse_() {
     uint32_t nonzero = 0, inter[MAX_RAW]{}, planar[MAX_RAW]{};
     for (size_t i = 0; i < n; i++) {
       if ((i & 0xFFFF) == 0)
-        App.feed_wdt();
+        vTaskDelay(1);
       const int16_t o = this->out_[i];
       if (o == 0)
         continue;
@@ -273,6 +309,15 @@ void BssProbe::analyse_() {
                "identical)",
                this->planar_ ? "one channel after another" : "interleaved", bc, pct);
     }
+    // Each raw channel into a buffer of its own (fast playback and analysis)
+    for (size_t i = 0; i < n; i++) {
+      if ((i & 0xFFFF) == 0)
+        vTaskDelay(1);
+      const size_t f = i / fs, j = i % fs;
+      const int16_t *block = this->raw_ + f * fs * ch;
+      for (int c = 0; c < ch; c++)
+        this->planar_buf_[static_cast<size_t>(c) * this->cap_ + i] = this->planar_ ? block[c * fs + j] : block[j * ch + c];
+    }
   }
 
   // Levels: overall, per second, peak; playback gain.
@@ -284,7 +329,7 @@ void BssProbe::analyse_() {
     line[0] = '\0';
     for (size_t i = 0; i < n; i++) {
       if ((i & 0xFFFF) == 0)
-        App.feed_wdt();
+        vTaskDelay(1);
       const int v = this->sample_(s, i);
       sum += static_cast<double>(v) * v;
       sum_sec += static_cast<double>(v) * v;
@@ -312,7 +357,7 @@ void BssProbe::analyse_() {
       double xy = 0, xx = 0, yy = 0;
       for (size_t i = 0; i < n; i++) {
         if ((i & 0xFFFF) == 0)
-          App.feed_wdt();
+          vTaskDelay(1);
         const double x = this->sample_(a, i), y = this->sample_(b, i);
         xy += x * y;
         xx += x * x;
@@ -324,8 +369,8 @@ void BssProbe::analyse_() {
                this->stream_name_(b, nb, sizeof(nb)), r);
     }
   }
-  this->have_rec_ = true;
-  ESP_LOGI(TAG, "Key 2 plays stream 1 of %d", this->streams_);
+  this->have_rec_.store(true, std::memory_order_release);
+  ESP_LOGI(TAG, "Key 1 plays stream 1 of %d", this->streams_);
 }
 
 // ------------------------------------------------------------ playback
@@ -428,11 +473,14 @@ Color BssProbe::led_color(int i, int n) const {
       // Number of lit LEDs = stream number (1 = output, 2 = raw 0, ...)
       return i <= this->play_stream_ ? Color(255, 255, 255) : Color(0, 0, 0);
     default:
-      // Idle: one LED, white; amber with the echo test on; dim until the mic runs
+      // Idle: one LED, white; amber with the echo test on; dim until the mic runs;
+      // blinking while the last recording is analysed
       if (i != 0)
         return Color(0, 0, 0);
       if (!this->mic_started_)
         return Color(30, 30, 30);
+      if (this->analysing_.load(std::memory_order_relaxed) && (millis() / 125) % 2 == 0)
+        return Color(0, 0, 0);
       return this->echo_test_ ? Color(255, 120, 0) : Color(120, 120, 120);
   }
 }

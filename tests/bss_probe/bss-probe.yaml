@@ -5,8 +5,10 @@
 # trigger_channel_id), and plays each one back on the speaker. Same audio stack and
 # AFE settings as esphome-va-1.yaml; no Home Assistant voice, wake word or media.
 #
-#   Key 1  record 10 s (ring fills red); with the echo test on, noise bursts play meanwhile
-#   Key 2  play the next stream; the number of white LEDs is the stream:
+#   Key 2  record 10 s (ring fills red); a press while recording starts again. With
+#          the echo test on, noise bursts play meanwhile. The idle LED blinks for
+#          about a second afterwards while the recording is analysed.
+#   Key 1  play the next stream; the number of white LEDs is the stream:
 #          1 = AFE output (what the voice firmware sends on), 2 = raw 0, 3 = raw 1, ...
 #          A press while one is playing moves on to the next.
 #   Key 3  echo test on / off (idle LED amber = on, white = off)
@@ -240,7 +242,7 @@ binary_sensor:
       number: 9
       inverted: true
     on_press:
-      - lambda: id(probe).key_record();
+      - lambda: id(probe).key_play_next();
 
   - platform: gpio
     name: Key2
@@ -250,7 +252,7 @@ binary_sensor:
       number: 10
       inverted: true
     on_press:
-      - lambda: id(probe).key_play_next();
+      - lambda: id(probe).key_record();
 
   - platform: gpio
     name: Key3

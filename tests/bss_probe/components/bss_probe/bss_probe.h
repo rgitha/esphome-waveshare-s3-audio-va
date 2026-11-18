@@ -4,10 +4,14 @@
 // into PSRAM at the same moment, logs what they are, and plays each one back on
 // the speaker. Test firmware only (tests/bss_probe).
 //
-//   Key 1  record (record_seconds); with the echo test on, a test sound plays meanwhile
-//   Key 2  play the next stream: 1 = AFE output, 2 = raw 0, 3 = raw 1, ...
+//   Key 2  record (record_seconds); a press while recording starts again. With the
+//          echo test on, a test sound plays meanwhile.
+//   Key 1  play the next stream: 1 = AFE output, 2 = raw 0, 3 = raw 1, ...
 //          (a press while playing moves on to the next one)
 //   Key 3  echo test on / off
+//
+// The analysis runs in its own task after each recording, so the LEDs and keys
+// stay live meanwhile.
 
 #include "esphome/core/color.h"
 #include "esphome/core/component.h"
@@ -56,6 +60,7 @@ class BssProbe : public Component {
 
   static void tap_cb_(const esp_afe::EspAfe::ResultTap &tap, void *ctx);
   void on_tap_(const esp_afe::EspAfe::ResultTap &tap);
+  static void analysis_task_(void *arg);
   void analyse_();
   int16_t sample_(int stream, size_t i) const;
   void speaker_start_();
@@ -82,8 +87,10 @@ class BssProbe : public Component {
   // Recording (written by the AFE fetch task while recording_ is set)
   int16_t *out_{nullptr};  // AFE output
   int16_t *raw_{nullptr};  // raw_data blocks, as delivered (frame after frame)
+  int16_t *planar_buf_{nullptr};  // raw channels after the analysis, one after another
   size_t cap_{0};          // samples per stream
   std::atomic<bool> recording_{false};
+  std::atomic<int> in_tap_{0};    // the fetch task is inside on_tap_
   std::atomic<bool> rec_done_{false};
   std::atomic<uint32_t> pos_{0};  // samples recorded
   int frame_samples_{0};
@@ -93,8 +100,9 @@ class BssProbe : public Component {
   uint32_t trig_other_{0};
   const char *rec_error_{nullptr};
 
-  // Result of the analysis
-  bool have_rec_{false};
+  // Result of the analysis (written by the analysis task before have_rec_)
+  std::atomic<bool> analysing_{false};
+  std::atomic<bool> have_rec_{false};
   size_t rec_len_{0};
   int streams_{1};
   bool planar_{false};
