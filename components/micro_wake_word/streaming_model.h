@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #ifdef USE_ESP32
 
 #include "preprocessor_settings.h"
@@ -157,7 +159,23 @@ class WakeWordModel final : public StreamingModel {
 
   bool get_internal_only() { return this->internal_only_; }
 
+  // Local change (test, comparing wake word instances): the peak of the sliding
+  // average probability over roughly the last PEAK_WINDOW_MS, and when the model
+  // last crossed its cutoff (passed, or vetoed by the VAD model). Written by the
+  // inference task, read by the main loop.
+  static constexpr uint32_t PEAK_WINDOW_MS = 2000;
+  uint8_t get_recent_peak() const { return this->peak_.load(std::memory_order_relaxed); }
+  uint32_t get_last_detected_ms() const { return this->last_detected_ms_.load(std::memory_order_relaxed); }
+  uint32_t get_last_vetoed_ms() const { return this->last_vetoed_ms_.load(std::memory_order_relaxed); }
+  void mark_detected(uint32_t now) { this->last_detected_ms_.store(now, std::memory_order_relaxed); }
+  void mark_vetoed(uint32_t now) { this->last_vetoed_ms_.store(now, std::memory_order_relaxed); }
+
  protected:
+  std::atomic<uint8_t> peak_{0};
+  std::atomic<uint32_t> peak_ms_{0};
+  std::atomic<uint32_t> last_detected_ms_{0};
+  std::atomic<uint32_t> last_vetoed_ms_{0};
+
   // Kept for runtime-downloaded models so the model buffer stays alive for the model's lifetime.
   // Null for compiled-in models (their data lives in flash).
   std::shared_ptr<ModelData> model_data_;

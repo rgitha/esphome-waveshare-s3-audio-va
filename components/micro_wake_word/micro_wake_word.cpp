@@ -96,7 +96,8 @@ void MicroWakeWord::dump_config() {
 void MicroWakeWord::setup() {
   // Local change: a task name of its own per instance (CPU statistics, logs)
   static int instances = 0;
-  this->task_name_ = instances++ == 0 ? "mww" : "mww2";
+  static const char *const NAMES[] = {"mww", "mww2", "mww3", "mww4"};
+  this->task_name_ = NAMES[std::min(instances++, 3)];
   this->frontend_config_.window.size_ms = FEATURE_DURATION_MS;
   this->frontend_config_.window.step_size_ms = this->features_step_size_;
   this->frontend_config_.filterbank.num_channels = PREPROCESSOR_FEATURE_SIZE;
@@ -422,8 +423,9 @@ void MicroWakeWord::loop() {
 
   if (event_group_bits & EventGroupBits::WARNING_FULL_RING_BUFFER) {
     xEventGroupClearBits(this->event_group_, EventGroupBits::WARNING_FULL_RING_BUFFER);
-    ESP_LOGW(TAG, "Not enough free bytes in ring buffer to store incoming audio data. Resetting the ring buffer. Wake "
-                  "word detection accuracy will temporarily be reduced.");
+    ESP_LOGW(TAG, "[%s] Not enough free bytes in ring buffer to store incoming audio data. Resetting the ring buffer. Wake "
+                  "word detection accuracy will temporarily be reduced.",
+             this->task_name_);
   }
 
   if (event_group_bits & EventGroupBits::WARNING_MODELS_RESUME_TIMEOUT) {
@@ -489,12 +491,14 @@ void MicroWakeWord::loop() {
       DetectionEvent detection_event;
       while (xQueueReceive(this->detection_queue_, &detection_event, 0)) {
         if (detection_event.blocked_by_vad) {
-          ESP_LOGD(TAG, "Wake word model predicts '%s', but VAD model doesn't.", detection_event.wake_word->c_str());
+          ESP_LOGD(TAG, "[%s] Wake word model predicts '%s', but VAD model doesn't.", this->task_name_,
+                   detection_event.wake_word->c_str());
+          this->vad_blocked_trigger_.trigger(*detection_event.wake_word);  // local change (test)
         } else {
           constexpr float uint8_to_float_divisor =
               255.0f;  // Converting a quantized uint8 probability to floating point
-          ESP_LOGD(TAG, "Detected '%s' with sliding average probability is %.2f and max probability is %.2f",
-                   detection_event.wake_word->c_str(), (detection_event.average_probability / uint8_to_float_divisor),
+          ESP_LOGD(TAG, "[%s] Detected '%s' with sliding average probability is %.2f and max probability is %.2f",
+                   this->task_name_, detection_event.wake_word->c_str(), (detection_event.average_probability / uint8_to_float_divisor),
                    (detection_event.max_probability / uint8_to_float_divisor));
           this->wake_word_detected_trigger_.trigger(*detection_event.wake_word);
           if (this->stop_after_detection_) {
@@ -603,6 +607,7 @@ void MicroWakeWord::process_probabilities_() {
 #ifdef USE_MICRO_WAKE_WORD_VAD
         if (vad_state.detected) {
 #endif
+          model->mark_detected(millis());  // local change (test)
           xQueueSend(this->detection_queue_, &wake_word_state, portMAX_DELAY);
 
           // Wake main loop immediately to process wake word detection
@@ -611,6 +616,7 @@ void MicroWakeWord::process_probabilities_() {
           model->reset_probabilities();
 #ifdef USE_MICRO_WAKE_WORD_VAD
         } else {
+          model->mark_vetoed(millis());  // local change (test)
           wake_word_state.blocked_by_vad = true;
           xQueueSend(this->detection_queue_, &wake_word_state, portMAX_DELAY);
         }

@@ -63,6 +63,8 @@ class MicroWakeWord final : public Component
   void set_task_stack_in_psram(bool task_stack_in_psram) { this->task_stack_in_psram_ = task_stack_in_psram; }
 
   Trigger<std::string> *get_wake_word_detected_trigger() { return &this->wake_word_detected_trigger_; }
+  // Local change (test): a wake word model crossed its cutoff but the VAD model vetoed it
+  Trigger<std::string> *get_vad_blocked_trigger() { return &this->vad_blocked_trigger_; }
 
   void add_wake_word_model(WakeWordModel *model);
 
@@ -107,6 +109,7 @@ class MicroWakeWord final : public Component
  protected:
   microphone::MicrophoneSource *microphone_source_{nullptr};
   Trigger<std::string> wake_word_detected_trigger_;
+  Trigger<std::string> vad_blocked_trigger_;
   State state_{State::STOPPED};
 
   std::weak_ptr<ring_buffer::RingBuffer> ring_buffer_;
@@ -125,7 +128,7 @@ class MicroWakeWord final : public Component
 
   bool task_stack_in_psram_{false};
 
-  // Local change: inference task name, "mww" for the first instance, "mww2" for the second
+  // Local change: inference task name per instance: mww, mww2, mww3, mww4
 
   const char *task_name_{"mww"};
 

@@ -1,5 +1,7 @@
 #include "streaming_model.h"
 
+#include "esphome/core/hal.h"
+
 #ifdef USE_ESP32
 
 #include "esphome/core/helpers.h"
@@ -349,6 +351,15 @@ DetectionEvent WakeWordModel::determine_detected() {
 
   detection_event.average_probability = sum / this->sliding_window_size_;
   detection_event.detected = sum > this->probability_cutoff_ * this->sliding_window_size_;
+
+  // Local change: rolling peak of the sliding average (see get_recent_peak()); the
+  // peak holds for PEAK_WINDOW_MS, then follows the current value again.
+  const uint32_t now = millis();
+  if (detection_event.average_probability >= this->peak_.load(std::memory_order_relaxed) ||
+      now - this->peak_ms_.load(std::memory_order_relaxed) > PEAK_WINDOW_MS) {
+    this->peak_.store(detection_event.average_probability, std::memory_order_relaxed);
+    this->peak_ms_.store(now, std::memory_order_relaxed);
+  }
 
   this->unprocessed_probability_status_ = false;
   return detection_event;

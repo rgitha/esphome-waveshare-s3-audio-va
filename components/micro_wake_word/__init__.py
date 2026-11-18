@@ -36,9 +36,11 @@ _LOGGER = logging.getLogger(__name__)
 
 AUTO_LOAD = ["ring_buffer"]
 CODEOWNERS = ["@kahrendt", "@jesserockz"]
-# Local change (rgitha/esphome-waveshare-s3-audio-va, branch dual-mww): allow more
-# than one instance, so wake words can run on each separated (BSS) stream. Each
-# instance needs its own id and its own model ids. Copy of ESPHome 2026.10.2 otherwise.
+# Local changes (rgitha/esphome-waveshare-s3-audio-va, branch dual-mww): allow more
+# than one instance, so wake words can run on each separated (BSS) stream (each
+# instance needs its own id and its own model ids; task names mww, mww2, mww3...).
+# For testing: on_vad_blocked trigger, and per model the recent peak probability
+# and when it last fired or was vetoed. Copy of ESPHome 2026.10.2 otherwise.
 MULTI_CONF = True
 DEPENDENCIES = ["microphone"]
 
@@ -48,6 +50,7 @@ DOMAIN = "micro_wake_word"
 CONF_FEATURE_STEP_SIZE = "feature_step_size"
 CONF_MODELS = "models"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
+CONF_ON_VAD_BLOCKED = "on_vad_blocked"  # local change (test)
 CONF_PROBABILITY_CUTOFF = "probability_cutoff"
 CONF_SLIDING_WINDOW_AVERAGE_SIZE = "sliding_window_average_size"
 CONF_SLIDING_WINDOW_SIZE = "sliding_window_size"
@@ -428,6 +431,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ON_WAKE_WORD_DETECTED): automation.validate_automation(
                 single=True
             ),
+            # Local change (test): a wake word model crossed its cutoff but the VAD
+            # model vetoed it
+            cv.Optional(CONF_ON_VAD_BLOCKED): automation.validate_automation(
+                single=True
+            ),
             cv.Optional(CONF_VAD): _maybe_empty_vad_schema,
             cv.Optional(CONF_STOP_AFTER_DETECTION, default=True): cv.boolean,
             cv.Optional(CONF_TASK_STACK_IN_PSRAM): psram.validate_task_stack_in_psram,
@@ -606,6 +614,13 @@ async def to_code(config):
             var.get_wake_word_detected_trigger(),
             [(cg.std_string, "wake_word")],
             on_wake_word_detection_config,
+        )
+
+    if on_vad_blocked_config := config.get(CONF_ON_VAD_BLOCKED):
+        await automation.build_automation(
+            var.get_vad_blocked_trigger(),
+            [(cg.std_string, "wake_word")],
+            on_vad_blocked_config,
         )
 
 
