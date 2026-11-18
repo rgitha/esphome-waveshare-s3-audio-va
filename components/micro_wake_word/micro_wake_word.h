@@ -71,6 +71,8 @@ class MicroWakeWord final : public Component
   void set_task_stack_in_psram(bool task_stack_in_psram) { this->task_stack_in_psram_ = task_stack_in_psram; }
   // Local change: core for the inference task (0 or 1; -1 = no affinity)
   void set_task_core(int core) { this->task_core_ = core; }
+  // Local change: audio buffer between the microphone and inference (default 120 ms)
+  void set_ring_buffer_duration(uint32_t ms) { this->ring_buffer_duration_ms_ = ms; }
 
   Trigger<std::string> *get_wake_word_detected_trigger() { return &this->wake_word_detected_trigger_; }
   // Local change (test): a wake word model crossed its cutoff but the VAD model vetoed it
@@ -138,6 +140,7 @@ class MicroWakeWord final : public Component
 
   bool task_stack_in_psram_{false};
   int task_core_{-1};  // local change
+  uint32_t ring_buffer_duration_ms_{120};  // local change
 
   // Local change: inference task name per instance: mww, mww2, mww3, mww4
 

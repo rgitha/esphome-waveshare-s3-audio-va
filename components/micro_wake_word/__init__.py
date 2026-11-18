@@ -42,7 +42,7 @@ CODEOWNERS = ["@kahrendt", "@jesserockz"]
 # One lock for model inference across instances (esp-nn shares its convolution
 # scratch buffer). For testing: on_vad_blocked trigger, and per model the recent peak probability
 # and when it last fired or was vetoed. task_core: pin the inference task to a
-# core. Copy of ESPHome 2026.10.2 otherwise.
+# core. ring_buffer_duration: audio buffer size. Copy of ESPHome 2026.10.2 otherwise.
 MULTI_CONF = True
 DEPENDENCIES = ["microphone"]
 
@@ -54,6 +54,7 @@ CONF_MODELS = "models"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
 CONF_ON_VAD_BLOCKED = "on_vad_blocked"  # local change (test)
 CONF_TASK_CORE = "task_core"  # local change
+CONF_RING_BUFFER_DURATION = "ring_buffer_duration"  # local change
 CONF_PROBABILITY_CUTOFF = "probability_cutoff"
 CONF_SLIDING_WINDOW_AVERAGE_SIZE = "sliding_window_average_size"
 CONF_SLIDING_WINDOW_SIZE = "sliding_window_size"
@@ -445,6 +446,12 @@ CONFIG_SCHEMA = cv.All(
             # Local change: pin the inference task to a core (default: no affinity;
             # the task then stays on the core where it first uses floating point)
             cv.Optional(CONF_TASK_CORE): cv.int_range(min=0, max=1),
+            # Local change: audio buffer between the microphone and inference (same
+            # option name as upstream esphome/esphome PR #20942)
+            cv.Optional(CONF_RING_BUFFER_DURATION, default="120ms"): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(min=cv.TimePeriod(milliseconds=100), max=cv.TimePeriod(milliseconds=2000)),
+            ),
             cv.Optional(CONF_MODEL): cv.invalid(
                 f"The {CONF_MODEL} parameter has moved to be a list element under the {CONF_MODELS} parameter."
             ),
@@ -545,6 +552,8 @@ async def to_code(config):
 
     if (task_core := config.get(CONF_TASK_CORE)) is not None:
         cg.add(var.set_task_core(task_core))
+
+    cg.add(var.set_ring_buffer_duration(config[CONF_RING_BUFFER_DURATION].total_milliseconds))
 
     esp32.add_idf_component(name="espressif/esp-tflite-micro", ref="1.3.3~1")
     # Pin esp-nn for stable future builds (esp-tflite-micro depends on esp-nn)
