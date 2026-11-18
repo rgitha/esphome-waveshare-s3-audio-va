@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.6"
+  fw_version: "2026.11.18.7"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -1261,6 +1261,11 @@ globals:
     restore_value: no
     initial_value: '0'
   # TEST: comparison line already pending / this call is a repeat
+  # TEST: current AFE mode (for the echo filter length control)
+  - id: afe_mode_str
+    type: std::string
+    restore_value: no
+    initial_value: '"sr_high_perf"'
   - id: compare_busy
     type: bool
     restore_value: no
@@ -1857,6 +1862,26 @@ script:
             text: !lambda return stt_text;
 
 select:
+  # TEST: AFE mode at runtime, to compare CPU and quality. Changing it rebuilds the
+  # AFE (with the echo filter length below); a failed rebuild rolls back.
+  - platform: template
+    id: afe_mode_select
+    name: "AFE mode (test)"
+    entity_category: config
+    optimistic: true
+    options:
+      - sr_high_perf
+      - sr_low_cost
+    initial_option: sr_high_perf
+    restore_value: false
+    set_action:
+      - lambda: |-
+          id(afe_mode_str) = x.str();
+          id(afe_processor).set_aec_filter_length((int) id(aec_filter_len).state);
+      - esp_afe.set_mode:
+          id: afe_processor
+          mode: !lambda return x.str();
+
   - platform: template
     name: "Wake word sensitivity"
     optimistic: true
@@ -1911,6 +1936,54 @@ select:
             id(saved_alarm_action) = x;
 
 switch:
+  # TEST: Espressif's AFE VAD (only feeds the Voice Detected sensor), off to save CPU
+  - platform: esp_afe
+    esp_afe_id: afe_processor
+    vad:
+      id: afe_vad_switch
+      name: "AFE VAD (test)"
+      restore_mode: ALWAYS_ON
+      entity_category: config
+
+  # TEST: each wake word instance on/off, to read its CPU cost. A reconnect to Home
+  # Assistant or an OTA error starts all three again.
+  - platform: template
+    id: mww_raw0_switch
+    name: "Wake word on raw 0 (test)"
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    turn_on_action:
+      - micro_wake_word.start:
+          id: mww
+    turn_off_action:
+      - micro_wake_word.stop:
+          id: mww
+  - platform: template
+    id: mww_raw1_switch
+    name: "Wake word on raw 1 (test)"
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    turn_on_action:
+      - micro_wake_word.start:
+          id: mww_b
+    turn_off_action:
+      - micro_wake_word.stop:
+          id: mww_b
+  - platform: template
+    id: mww_output_switch
+    name: "Wake word on output (test)"
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    turn_on_action:
+      - micro_wake_word.start:
+          id: mww_c
+    turn_off_action:
+      - micro_wake_word.stop:
+          id: mww_c
+
   # Echo cancellation on/off for A/B testing (keep on for normal use). The
   # speaker level calibration needs it on; while off, calibration pauses.
   - platform: esp_afe
@@ -2058,6 +2131,24 @@ switch:
       - script.execute: control_leds
 
 number:
+  # TEST: echo filter length at runtime (applied by rebuilding the AFE in the
+  # current AFE mode). Shorter = less CPU, less echo tail cancelled.
+  - platform: template
+    id: aec_filter_len
+    name: "Echo filter length (test)"
+    entity_category: config
+    optimistic: true
+    min_value: 2
+    max_value: 4
+    step: 1
+    initial_value: 4
+    restore_value: false
+    set_action:
+      - lambda: id(afe_processor).set_aec_filter_length((int) x);
+      - esp_afe.set_mode:
+          id: afe_processor
+          mode: !lambda return id(afe_mode_str);
+
   # Digital level trim applied after the AFE (0 dB = unity, saved across reboots).
   # The ES7210 analogue gain is fixed by the es7210_gain_db substitution.
   - platform: esp_audio_stack

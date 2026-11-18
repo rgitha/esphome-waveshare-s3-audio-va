@@ -4,6 +4,9 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.18
 
+- **.7** (TEST, branch dual-mww) Runtime controls to measure CPU against quality:
+  AFE mode (sr_high_perf / sr_low_cost), echo filter length (2-4), AFE VAD on/off,
+  and each wake word instance (raw 0, raw 1, output) on/off.
 - **.6** (TEST, branch dual-mww) .5 crashed (StoreProhibited in esp-nn's
   convolution): esp-nn keeps one convolution scratch buffer for all callers, and
   two wake word instances ran models at the same time on both cores. Model
