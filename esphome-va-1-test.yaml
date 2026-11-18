@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.8"
+  fw_version: "2026.11.18.9"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -57,7 +57,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: e4d588e97586551809c1822c25ee45e6e8c40c86
+  repo_ref: 22f0e4ebb7e15c41731c1f06d38de1ccdb82a174
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -218,6 +218,8 @@ api:
             id(led_ring_color_b) = std::min(1.0f, std::max(0.0f, blue));
     - action: start_va
       then:
+        # TEST (stream selection): no wake word chose a stream -> the output
+        - lambda: id(va).select_stream(2);
         - voice_assistant.start
     - action: stop_va
       then:
@@ -1031,6 +1033,14 @@ voice_assistant:
     # Using diff channel from mww so that some gain settings can apply properly?
     # https://github.com/esphome/esphome/pull/8645 Apr 2025
     # (That PR lets each consumer pick its own channel and gain_factor from one mic.)
+  # TEST (stream selection): the separated streams as alternative STT sources (stream
+  # 0, 1; the microphone above is stream 2). on_wake selects the stream that fired,
+  # start_va the output; continued conversation keeps the last one.
+  stream_microphones:
+    - microphone: afe_raw0
+      id: va_stream0
+    - microphone: afe_raw1
+      id: va_stream1
   media_player: external_media_player
   micro_wake_word: mww
   use_wake_word: false
@@ -1481,6 +1491,8 @@ script:
                                               priority: true
                                               sound_file: "wake_word_triggered_sound"
                                           - delay: 300ms
+                                    # TEST (stream selection): STT gets the stream that fired
+                                    - lambda: id(va).select_stream(stream);
                                     - voice_assistant.start:
                                         wake_word: !lambda return wake_word;
   - id: night_mode_enter

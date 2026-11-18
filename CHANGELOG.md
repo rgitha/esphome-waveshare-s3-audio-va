@@ -4,6 +4,11 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.18
 
+- **.9** (TEST, branch dual-mww) STT gets the stream whose wake word fired (raw 0,
+  raw 1 or output), with the pre-roll from that stream (voice_assistant copy:
+  stream_microphones, select_stream()). Continued conversation keeps the last
+  stream; the start_va action uses the output. A selected stream that delivers
+  nothing for 500 ms falls back to the output.
 - **.8** (TEST, branch dual-mww; now esphome-va-1-test.yaml, friendly name
   "Voice Assistant 1 Test") Wake word tasks pinned to a core (new task_core option
   in the micro_wake_word copy): raw 0 and output on core 0, raw 1 on core 1. Until
