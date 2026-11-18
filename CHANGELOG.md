@@ -4,6 +4,10 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.18
 
+- **.10** (TEST, branch dual-mww) AFE mode low_cost at start (echo cancellation
+  as effective, less CPU during playback, less internal RAM); micro_wake_word audio
+  buffer 500 ms (new ring_buffer_duration option in the local copy); CPU statistics:
+  a task rebuilt during an interval no longer shows a wrapped value.
 - **.9** (TEST, branch dual-mww) STT gets the stream whose wake word fired (raw 0,
   raw 1 or output), with the pre-roll from that stream (voice_assistant copy:
   stream_microphones, select_stream()). Continued conversation keeps the last

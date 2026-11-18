@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.9"
+  fw_version: "2026.11.18.10"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -57,7 +57,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 22f0e4ebb7e15c41731c1f06d38de1ccdb82a174
+  repo_ref: b2a8442ca769f15a928fb7777f53725a9dc4bf35
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -669,7 +669,8 @@ esp_afe:
   type: sr            # speech recognition: linear AEC, keeps the spectrum intact for
                       # wake word / STT. "fd" (intercom default) adds nonlinear
                       # processing for two-way calls and lowered STT accuracy here.
-  mode: high_perf
+  mode: low_cost      # echo cancellation about as effective as high_perf, ~15-20 points less
+                      # CPU during playback, ~10 KB less internal RAM (only AEC differs)
   mic_num: ${afe_mic_num}  # see the afe_mic_num substitution
   se_enabled: ${afe_dual}  # dual-mic speech enhancement (BSS); BSS cannot be toggled at runtime
   aec_filter_length: 4
@@ -906,10 +907,10 @@ micro_wake_word:
   # comparison line with each stream's peak probability (compare_streams).
   - id: mww
     task_core: 0 # TEST: pinned (raw 0 and output on core 0, raw 1 on core 1)
-    # Larger audio buffer to absorb brief inference delays (default 120 ms).
-    # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
-    # merged to dev 2026-10-18; not in 2026.9 / 2026.10).
-    # ring_buffer_duration: 800ms
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
     microphone:
       id: mww_mic
       microphone: afe_raw0 # TEST: separated stream raw 0 (was afe_mic, the unseparated output)
@@ -944,10 +945,10 @@ micro_wake_word:
           trigger: "VAD veto on raw 0"
   - id: mww_b
     task_core: 1 # TEST: pinned
-    # Larger audio buffer to absorb brief inference delays (default 120 ms).
-    # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
-    # merged to dev 2026-10-18; not in 2026.9 / 2026.10).
-    # ring_buffer_duration: 800ms
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
     microphone:
       id: mww_b_mic
       microphone: afe_raw1 # TEST: separated stream raw 1
@@ -983,10 +984,10 @@ micro_wake_word:
 
   - id: mww_c # TEST ONLY: the unseparated output, for comparison; remove for production
     task_core: 0 # TEST: pinned
-    # Larger audio buffer to absorb brief inference delays (default 120 ms).
-    # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
-    # merged to dev 2026-10-18; not in 2026.9 / 2026.10).
-    # ring_buffer_duration: 800ms
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
     microphone:
       id: mww_c_mic
       microphone: afe_mic # TEST ONLY: unseparated output (what production used until now)
@@ -1278,7 +1279,7 @@ globals:
   - id: afe_mode_str
     type: std::string
     restore_value: no
-    initial_value: '"sr_high_perf"'
+    initial_value: '"sr_low_cost"'
   - id: compare_busy
     type: bool
     restore_value: no
@@ -1885,9 +1886,9 @@ select:
     entity_category: config
     optimistic: true
     options:
-      - sr_high_perf
       - sr_low_cost
-    initial_option: sr_high_perf
+      - sr_high_perf
+    initial_option: sr_low_cost # matches esp_afe mode: low_cost
     restore_value: false
     set_action:
       - lambda: |-
@@ -2534,6 +2535,8 @@ interval:
             for (const auto &p : prev)
               if (p.handle == t.xHandle)
                 before = p.time;
+            if (now < before)
+              before = 0;  // a new task at the address of a deleted one (e.g. the AFE rebuilt)
             if (first || elapsed <= 0)
               continue;
             const double pct = 100.0 * static_cast<double>(now - before) / elapsed;
