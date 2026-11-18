@@ -106,3 +106,9 @@ or model, push it and set `repo_ref` to that commit.
 **Battery.** Read on GPIO6, which needs a hardware change: R78 bridged from pad
 1 to pad 3, so the R2/R11 divider reaches GPIO6 (the camera keeps GPIO1).
 Reported every 5 min as the median of 10 readings.
+
+## License
+
+MIT, except the C++ files of `components/voice_assistant`: they are a copy of
+ESPHome's voice_assistant component with local changes and stay under GPLv3, as
+in ESPHome. See [LICENSE](LICENSE).
