@@ -39,7 +39,8 @@ CODEOWNERS = ["@kahrendt", "@jesserockz"]
 # Local changes (rgitha/esphome-waveshare-s3-audio-va, branch dual-mww): allow more
 # than one instance, so wake words can run on each separated (BSS) stream (each
 # instance needs its own id and its own model ids; task names mww, mww2, mww3...).
-# For testing: on_vad_blocked trigger, and per model the recent peak probability
+# One lock for model inference across instances (esp-nn shares its convolution
+# scratch buffer). For testing: on_vad_blocked trigger, and per model the recent peak probability
 # and when it last fired or was vetoed. Copy of ESPHome 2026.10.2 otherwise.
 MULTI_CONF = True
 DEPENDENCIES = ["microphone"]

@@ -7,7 +7,17 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <mutex>
+
 static const char *const TAG = "micro_wake_word";
+
+// Local change: esp-nn keeps its convolution scratch buffer in one file-scope
+// pointer that each convolution sets just before it runs, so two models invoked
+// at the same time (several micro_wake_word instances, tasks on both cores)
+// overwrite each other's buffer and crash. One lock for all instances: only one
+// model runs at a time. (A single instance runs its models one after another
+// anyway, so it never waits.)
+static std::mutex invoke_mutex;
 
 namespace esphome::micro_wake_word {
 
@@ -227,7 +237,11 @@ bool StreamingModel::perform_streaming_inference(const int8_t features[PREPROCES
     ++this->current_stride_step_;
 
     if (this->current_stride_step_ >= stride) {
-      TfLiteStatus invoke_status = this->interpreter_->Invoke();
+      TfLiteStatus invoke_status;
+      {
+        std::lock_guard<std::mutex> lock(invoke_mutex);  // local change, see invoke_mutex
+        invoke_status = this->interpreter_->Invoke();
+      }
       if (invoke_status != kTfLiteOk) {
         ESP_LOGW(TAG, "Streaming interpreter invoke failed");
         return false;
