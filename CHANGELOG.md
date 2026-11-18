@@ -4,6 +4,10 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.18
 
+- **.6** (TEST, branch dual-mww) .5 crashed (StoreProhibited in esp-nn's
+  convolution): esp-nn keeps one convolution scratch buffer for all callers, and
+  two wake word instances ran models at the same time on both cores. Model
+  inference now takes one lock shared by all instances.
 - **.5** (TEST, branch dual-mww) Wake word on both separated (BSS) streams: one
   micro_wake_word instance on raw 0 and one on raw 1 (patched copy allowing two
   instances; raw streams from the audio stack fork's dual-mww branch), each with

@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.5"
+  fw_version: "2026.11.18.6"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -57,7 +57,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 43cf4004ce6c9d4287490f7f1a45fed736d8e1d0
+  repo_ref: 9f60d2cdc75f0dff2ddd9df322d41e35aea56203
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
