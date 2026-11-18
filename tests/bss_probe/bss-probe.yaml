@@ -18,14 +18,13 @@
 #          log gives the test sound level above the gaps for each stream.
 #
 # The probe component is in components/bss_probe next to this file. Flash it over
-# the voice firmware; flash esphome-va-1.yaml back afterwards (HA shows esphome-va-1
-# as unavailable meanwhile and does not see this device).
+# the voice firmware; flash esphome-va-1.yaml back afterwards. The probe keeps the
+# hostname esphome-va-1, so HA connects to it as that device; its usual entities show
+# as unavailable meanwhile.
 
 substitutions:
-  device_name: bss-probe
-  # Address of the board for OTA and logs (it is esphome-va-1 on the network until
-  # this firmware is on it; set to the board's current IP)
-  device_address: 192.168.11.16
+  device_name: esphome-va-1
+  friendly: "Voice Assistant 1 BSS-Probe"
 
   # Audio stack fork, branch bss-probe (adds the AFE result tap this probe uses)
   stack_ref: 00598fefdd1318bbeb600b2a968c0b0f567cfd70
@@ -48,7 +47,7 @@ substitutions:
 
 esphome:
   name: ${device_name}
-  friendly_name: BSS probe
+  friendly_name: ${friendly}
   min_version: 2026.10.0
   on_boot:
     - priority: -100
@@ -92,7 +91,6 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: none
-  use_address: ${device_address}
 
 logger:
 

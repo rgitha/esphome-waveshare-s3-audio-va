@@ -12,8 +12,10 @@ adds a diagnostic tap to `esp_afe` (`EspAfe::set_result_tap`).
 ## Use
 
 Copy `bss-probe.yaml` and `components/` into the ESPHome config folder (with
-`secrets.yaml`), set `device_address` to the board's IP and flash it over the voice
-firmware. Flash `esphome-va-1.yaml` back afterwards.
+`secrets.yaml`) and flash it over the voice firmware. It keeps the hostname
+esphome-va-1 (friendly name "Voice Assistant 1 BSS-Probe"), so HA connects to it as
+that device, with its usual entities unavailable meanwhile. Flash `esphome-va-1.yaml`
+back afterwards.
 
 | Key | Action | LEDs |
 |---|---|---|
