@@ -41,7 +41,8 @@ CODEOWNERS = ["@kahrendt", "@jesserockz"]
 # instance needs its own id and its own model ids; task names mww, mww2, mww3...).
 # One lock for model inference across instances (esp-nn shares its convolution
 # scratch buffer). For testing: on_vad_blocked trigger, and per model the recent peak probability
-# and when it last fired or was vetoed. Copy of ESPHome 2026.10.2 otherwise.
+# and when it last fired or was vetoed. task_core: pin the inference task to a
+# core. Copy of ESPHome 2026.10.2 otherwise.
 MULTI_CONF = True
 DEPENDENCIES = ["microphone"]
 
@@ -52,6 +53,7 @@ CONF_FEATURE_STEP_SIZE = "feature_step_size"
 CONF_MODELS = "models"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
 CONF_ON_VAD_BLOCKED = "on_vad_blocked"  # local change (test)
+CONF_TASK_CORE = "task_core"  # local change
 CONF_PROBABILITY_CUTOFF = "probability_cutoff"
 CONF_SLIDING_WINDOW_AVERAGE_SIZE = "sliding_window_average_size"
 CONF_SLIDING_WINDOW_SIZE = "sliding_window_size"
@@ -440,6 +442,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_VAD): _maybe_empty_vad_schema,
             cv.Optional(CONF_STOP_AFTER_DETECTION, default=True): cv.boolean,
             cv.Optional(CONF_TASK_STACK_IN_PSRAM): psram.validate_task_stack_in_psram,
+            # Local change: pin the inference task to a core (default: no affinity;
+            # the task then stays on the core where it first uses floating point)
+            cv.Optional(CONF_TASK_CORE): cv.int_range(min=0, max=1),
             cv.Optional(CONF_MODEL): cv.invalid(
                 f"The {CONF_MODEL} parameter has moved to be a list element under the {CONF_MODELS} parameter."
             ),
@@ -537,6 +542,9 @@ async def to_code(config):
     if config.get(CONF_TASK_STACK_IN_PSRAM):
         cg.add(var.set_task_stack_in_psram(True))
         psram.request_external_task_stack()
+
+    if (task_core := config.get(CONF_TASK_CORE)) is not None:
+        cg.add(var.set_task_core(task_core))
 
     esp32.add_idf_component(name="espressif/esp-tflite-micro", ref="1.3.3~1")
     # Pin esp-nn for stable future builds (esp-tflite-micro depends on esp-nn)

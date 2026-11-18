@@ -24,6 +24,14 @@
 
 namespace esphome::micro_wake_word {
 
+// Local change: StaticTask, but created pinned to a chosen core (core < 0: no
+// affinity, as StaticTask). Same allocation as esphome::StaticTask::create().
+class PinnedStaticTask : public StaticTask {
+ public:
+  bool create_pinned(TaskFunction_t fn, const char *name, uint32_t stack_size, void *param, UBaseType_t priority,
+                     bool use_psram, int core);
+};
+
 enum State {
   STARTING,
   DETECTING_WAKE_WORD,
@@ -61,6 +69,8 @@ class MicroWakeWord final : public Component
   void set_stop_after_detection(bool stop_after_detection) { this->stop_after_detection_ = stop_after_detection; }
 
   void set_task_stack_in_psram(bool task_stack_in_psram) { this->task_stack_in_psram_ = task_stack_in_psram; }
+  // Local change: core for the inference task (0 or 1; -1 = no affinity)
+  void set_task_core(int core) { this->task_core_ = core; }
 
   Trigger<std::string> *get_wake_word_detected_trigger() { return &this->wake_word_detected_trigger_; }
   // Local change (test): a wake word model crossed its cutoff but the VAD model vetoed it
@@ -127,6 +137,7 @@ class MicroWakeWord final : public Component
   bool stop_after_detection_;
 
   bool task_stack_in_psram_{false};
+  int task_core_{-1};  // local change
 
   // Local change: inference task name per instance: mww, mww2, mww3, mww4
 
@@ -144,7 +155,7 @@ class MicroWakeWord final : public Component
   // Used to send messages about the models' states to the main loop
   QueueHandle_t detection_queue_;
 
-  StaticTask inference_task_;
+  PinnedStaticTask inference_task_;  // local change: pinned to task_core_
 
   static void inference_task(void *params);
 

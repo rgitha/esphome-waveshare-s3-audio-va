@@ -93,6 +93,40 @@ void MicroWakeWord::dump_config() {
 #endif
 }
 
+// Local change: esphome::StaticTask::create(), pinned to a core.
+bool PinnedStaticTask::create_pinned(TaskFunction_t fn, const char *name, uint32_t stack_size, void *param,
+                                     UBaseType_t priority, bool use_psram, int core) {
+  if (this->handle_ != nullptr)
+    return false;
+  if (this->stack_buffer_ != nullptr && (stack_size > this->stack_size_ || use_psram != this->use_psram_))
+    this->stack_buffer_.reset();
+  if (this->stack_buffer_ == nullptr) {
+    this->stack_size_ = stack_size;
+    this->use_psram_ = use_psram;
+    RAMAllocator<StackType_t> allocator(use_psram ? RAMAllocator<StackType_t>::ALLOC_EXTERNAL
+                                                  : RAMAllocator<StackType_t>::ALLOC_INTERNAL);
+    this->stack_buffer_ = allocator.make_unique_array_for_overwrite(stack_size);
+  }
+  if (this->stack_buffer_ == nullptr)
+    return false;
+  if (this->tcb_ == nullptr) {
+    RAMAllocator<StaticTask_t> allocator(RAMAllocator<StaticTask_t>::ALLOC_INTERNAL);
+    this->tcb_ = allocator.make_unique();
+  }
+  if (this->tcb_ == nullptr) {
+    this->deallocate();
+    return false;
+  }
+  const BaseType_t affinity = (core == 0 || core == 1) ? static_cast<BaseType_t>(core) : tskNO_AFFINITY;
+  this->handle_ = xTaskCreateStaticPinnedToCore(fn, name, this->stack_size_, param, priority, this->stack_buffer_.get(),
+                                                this->tcb_.get(), affinity);
+  if (this->handle_ == nullptr) {
+    this->deallocate();
+    return false;
+  }
+  return true;
+}
+
 void MicroWakeWord::setup() {
   // Local change: a task name of its own per instance (CPU statistics, logs)
   static int instances = 0;
@@ -480,8 +514,9 @@ void MicroWakeWord::loop() {
           return;
         }
 
-        if (!this->inference_task_.create(MicroWakeWord::inference_task, this->task_name_, INFERENCE_TASK_STACK_SIZE,
-                                          (void *) this, INFERENCE_TASK_PRIORITY, this->task_stack_in_psram_)) {
+        if (!this->inference_task_.create_pinned(MicroWakeWord::inference_task, this->task_name_,
+                                                 INFERENCE_TASK_STACK_SIZE, (void *) this, INFERENCE_TASK_PRIORITY,
+                                                 this->task_stack_in_psram_, this->task_core_)) {
           FrontendFreeStateContents(&this->frontend_state_);  // Deallocate frontend state
           this->status_momentary_error("task_start", 1000);
         }
