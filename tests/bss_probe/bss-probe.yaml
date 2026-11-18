@@ -11,7 +11,11 @@
 #   Key 1  play the next stream; the number of white LEDs is the stream:
 #          1 = AFE output (what the voice firmware sends on), 2 = raw 0, 3 = raw 1, ...
 #          A press while one is playing moves on to the next.
-#   Key 3  echo test on / off (idle LED amber = on, white = off)
+#   Key 3  echo test, cycling: off (idle LED white) -> test sound with echo
+#          cancellation on (amber) -> test sound with echo cancellation off
+#          (magenta) -> off. Echo cancellation changes at once; recordings with the
+#          test sound play back at one fixed gain (echo_playback_gain_db), and the
+#          log gives the test sound level above the gaps for each stream.
 #
 # The probe component is in components/bss_probe next to this file. Flash it over
 # the voice firmware; flash esphome-va-1.yaml back afterwards (HA shows esphome-va-1
@@ -204,6 +208,7 @@ bss_probe:
   playback_peak_db: -6       # each stream is scaled so its peak plays at this level...
   max_playback_gain_db: 40   # ...by at most this much (levels are in the log)
   test_sound_level_db: -12   # echo test noise bursts
+  echo_playback_gain_db: 20  # fixed playback gain for recordings with the test sound
 
 switch:
   - platform: gpio

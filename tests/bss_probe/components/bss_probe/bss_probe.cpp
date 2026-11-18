@@ -40,9 +40,10 @@ void BssProbe::dump_config() {
                 "BSS probe:\n"
                 "  Recording: %.1f s (%u samples per stream, up to %d raw channels)\n"
                 "  Playback: volume %.2f, peak %.1f dBFS, gain at most %.0f dB\n"
-                "  Echo test sound: %.1f dBFS bursts",
+                "  Echo test sound: %.1f dBFS bursts, played back at %+.0f dB",
                 this->record_seconds_, static_cast<unsigned>(this->cap_), MAX_RAW, this->playback_volume_,
-                this->playback_peak_db_, this->max_playback_gain_db_, this->test_level_db_);
+                this->playback_peak_db_, this->max_playback_gain_db_, this->test_level_db_,
+                this->echo_playback_gain_db_);
 }
 
 // ------------------------------------------------------------ AFE fetch task
@@ -170,10 +171,11 @@ void BssProbe::key_record() {
   this->pos_.store(0, std::memory_order_relaxed);
   this->rec_done_.store(false, std::memory_order_relaxed);
   this->state_ = State::RECORDING;
-  ESP_LOGI(TAG, "Recording %.1f s%s, echo test %s", this->record_seconds_, restart ? " (started again)" : "",
-           this->echo_test_ ? "ON" : "off");
+  this->rec_echo_mode_ = this->echo_mode_;
+  ESP_LOGI(TAG, "Recording %.1f s%s, echo test: %s", this->record_seconds_, restart ? " (started again)" : "",
+           this->echo_mode_name_(this->echo_mode_));
   this->recording_.store(true, std::memory_order_release);
-  if (this->echo_test_) {
+  if (this->echo_mode_ != 0) {
     this->play_stream_ = -1;
     this->speaker_start_();  // test sound from the start (the speaker keeps running on a restart)
   } else if (this->play_stream_ == -1) {
@@ -200,9 +202,26 @@ void BssProbe::key_play_next() {
 void BssProbe::key_toggle_echo_test() {
   if (this->state_ == State::RECORDING)
     return;
-  this->echo_test_ = !this->echo_test_;
-  ESP_LOGI(TAG, "Echo test %s: the next recording %s", this->echo_test_ ? "ON" : "off",
-           this->echo_test_ ? "plays a test sound (noise bursts, 0.5 s on / 0.5 s off)" : "is silent");
+  this->echo_mode_ = (this->echo_mode_ + 1) % 3;
+  // Echo cancellation off only in mode 2; back on otherwise
+  const bool aec = this->echo_mode_ != 2;
+  if (aec != this->afe_->is_aec_enabled()) {
+    if (!(aec ? this->afe_->enable_aec() : this->afe_->disable_aec()))
+      ESP_LOGW(TAG, "Could not turn echo cancellation %s", aec ? "on" : "off");
+  }
+  ESP_LOGI(TAG, "Echo test: %s (echo cancellation is %s)", this->echo_mode_name_(this->echo_mode_),
+           this->afe_->is_aec_enabled() ? "ON" : "OFF");
+}
+
+const char *BssProbe::echo_mode_name_(uint8_t mode) const {
+  switch (mode) {
+    case 1:
+      return "test sound, echo cancellation ON";
+    case 2:
+      return "test sound, echo cancellation OFF";
+    default:
+      return "off (silent)";
+  }
 }
 
 // ------------------------------------------------------------ analysis
@@ -343,12 +362,42 @@ void BssProbe::analyse_() {
     }
     const float rms_db = to_db(sum / n / (32768.0 * 32768.0));
     const float peak_db = peak > 0 ? 20.0f * std::log10(peak / 32768.0f) : -120.0f;
-    float g_db = peak > 0 ? this->playback_peak_db_ - peak_db : 0.0f;
-    g_db = std::min(g_db, this->max_playback_gain_db_);
+    float g_db;
+    if (this->rec_echo_mode_ != 0) {
+      g_db = this->echo_playback_gain_db_;  // the same for every stream and recording
+    } else {
+      g_db = peak > 0 ? this->playback_peak_db_ - peak_db : 0.0f;
+      g_db = std::min(g_db, this->max_playback_gain_db_);
+    }
     this->gain_[s] = std::pow(10.0f, g_db / 20.0f);
     char name[16];
     ESP_LOGI(TAG, "Stream %d (%s): rms %.1f dBFS, peak %.1f dBFS, plays at %+.0f dB; per second:%s", s + 1,
              this->stream_name_(s, name, sizeof(name)), rms_db, peak_db, g_db, line);
+    if (this->rec_echo_mode_ != 0) {
+      // Test sound level: the middle of the bursts against the middle of the gaps.
+      // Bursts start every second; within each second, 0.25-0.5 s is inside the
+      // burst and 0.75-1.0 s inside the gap for any speaker delay up to 0.25 s.
+      // The first second is skipped.
+      double on = 0, off = 0;
+      size_t n_on = 0, n_off = 0;
+      for (size_t i = RATE; i < n; i++) {
+        const size_t t = i % RATE;
+        const double v = this->sample_(s, i);
+        if (t >= RATE / 4 && t < RATE / 2) {
+          on += v * v;
+          n_on++;
+        } else if (t >= 3 * RATE / 4) {
+          off += v * v;
+          n_off++;
+        }
+      }
+      if (n_on > 0 && n_off > 0) {
+        const float on_db = to_db(on / n_on / (32768.0 * 32768.0));
+        const float off_db = to_db(off / n_off / (32768.0 * 32768.0));
+        ESP_LOGI(TAG, "  test sound %.1f dBFS, gaps %.1f dBFS: %.1f dB above the gaps (%s)", on_db, off_db,
+                 on_db - off_db, this->echo_mode_name_(this->rec_echo_mode_));
+      }
+    }
   }
 
   // Correlation at lag 0 between every pair of streams.
@@ -481,7 +530,12 @@ Color BssProbe::led_color(int i, int n) const {
         return Color(30, 30, 30);
       if (this->analysing_.load(std::memory_order_relaxed) && (millis() / 125) % 2 == 0)
         return Color(0, 0, 0);
-      return this->echo_test_ ? Color(255, 120, 0) : Color(120, 120, 120);
+      // white = no test sound, amber = test sound with echo cancellation, magenta = without
+      if (this->echo_mode_ == 1)
+        return Color(255, 120, 0);
+      if (this->echo_mode_ == 2)
+        return Color(255, 0, 160);
+      return Color(120, 120, 120);
   }
 }
 

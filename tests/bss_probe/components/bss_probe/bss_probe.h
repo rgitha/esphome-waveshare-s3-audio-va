@@ -8,7 +8,10 @@
 //          echo test on, a test sound plays meanwhile.
 //   Key 1  play the next stream: 1 = AFE output, 2 = raw 0, 3 = raw 1, ...
 //          (a press while playing moves on to the next one)
-//   Key 3  echo test on / off
+//   Key 3  echo test: off -> test sound, echo cancellation on -> test sound, echo
+//          cancellation off -> off. Echo cancellation changes at once, so it has
+//          settled by the next recording; recordings with the test sound play back
+//          at one fixed gain, so they can be compared by ear.
 //
 // The analysis runs in its own task after each recording, so the LEDs and keys
 // stay live meanwhile.
@@ -39,6 +42,7 @@ class BssProbe : public Component {
   void set_playback_peak_db(float db) { this->playback_peak_db_ = db; }
   void set_max_playback_gain_db(float db) { this->max_playback_gain_db_ = db; }
   void set_test_sound_level_db(float db) { this->test_level_db_ = db; }
+  void set_echo_playback_gain_db(float db) { this->echo_playback_gain_db_ = db; }
 
   // Keys
   void key_record();
@@ -78,11 +82,15 @@ class BssProbe : public Component {
   float playback_peak_db_{-6.0f};
   float max_playback_gain_db_{40.0f};
   float test_level_db_{-12.0f};
+  float echo_playback_gain_db_{20.0f};
 
   State state_{State::IDLE};
   bool failed_{false};
   bool mic_started_{false};
-  bool echo_test_{false};
+  // Echo test: 0 = off, 1 = test sound with echo cancellation on, 2 = with it off
+  uint8_t echo_mode_{0};
+  uint8_t rec_echo_mode_{0};  // of the recording in the buffers
+  const char *echo_mode_name_(uint8_t mode) const;
 
   // Recording (written by the AFE fetch task while recording_ is set)
   int16_t *out_{nullptr};  // AFE output

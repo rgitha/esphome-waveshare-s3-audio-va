@@ -15,6 +15,7 @@ CONF_PLAYBACK_VOLUME = "playback_volume"
 CONF_PLAYBACK_PEAK_DB = "playback_peak_db"
 CONF_MAX_PLAYBACK_GAIN_DB = "max_playback_gain_db"
 CONF_TEST_SOUND_LEVEL_DB = "test_sound_level_db"
+CONF_ECHO_PLAYBACK_GAIN_DB = "echo_playback_gain_db"
 
 bss_probe_ns = cg.esphome_ns.namespace("bss_probe")
 BssProbe = bss_probe_ns.class_("BssProbe", cg.Component)
@@ -32,6 +33,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_PLAYBACK_PEAK_DB, default=-6.0): cv.float_range(min=-30.0, max=0.0),
         cv.Optional(CONF_MAX_PLAYBACK_GAIN_DB, default=40.0): cv.float_range(min=0.0, max=60.0),
         cv.Optional(CONF_TEST_SOUND_LEVEL_DB, default=-12.0): cv.float_range(min=-40.0, max=0.0),
+        # Recordings with the test sound play back at this one fixed gain, so the
+        # echo cancellation on / off recordings can be compared by ear.
+        cv.Optional(CONF_ECHO_PLAYBACK_GAIN_DB, default=20.0): cv.float_range(min=0.0, max=60.0),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -47,3 +51,4 @@ async def to_code(config):
     cg.add(var.set_playback_peak_db(config[CONF_PLAYBACK_PEAK_DB]))
     cg.add(var.set_max_playback_gain_db(config[CONF_MAX_PLAYBACK_GAIN_DB]))
     cg.add(var.set_test_sound_level_db(config[CONF_TEST_SOUND_LEVEL_DB]))
+    cg.add(var.set_echo_playback_gain_db(config[CONF_ECHO_PLAYBACK_GAIN_DB]))
