@@ -195,8 +195,25 @@ class VoiceAssistant final : public Component {
   void set_volume_multiplier(float volume_multiplier) { this->volume_multiplier_ = volume_multiplier; }
   void set_conversation_timeout(uint32_t conversation_timeout) { this->conversation_timeout_ = conversation_timeout; }
   // Pre-roll patch
-  void set_preroll_source(microphone::MicrophoneSource *source) { this->preroll_source_ = source; }
+  void set_preroll_source(microphone::MicrophoneSource *source) { this->preroll_[OUTPUT_STREAM].source = source; }
   void set_wake_word_preroll(uint32_t ms) { this->preroll_ms_ = ms; }
+  // Stream selection patch: the separated (BSS) streams as alternative sources for
+  // STT. Stream 0 and 1 are added here (a live source and a passive pre-roll source
+  // each); stream 2 (OUTPUT_STREAM) is the normal microphone. select_stream() chooses
+  // the stream for the next run; a selected stream that delivers nothing falls back
+  // to the output.
+  static constexpr int OUTPUT_STREAM = 2;
+  static constexpr int MAX_STREAMS = 3;
+  void add_stream_microphone(int index, microphone::MicrophoneSource *live, microphone::MicrophoneSource *preroll) {
+    if (index >= 0 && index < OUTPUT_STREAM) {
+      this->stream_live_[index] = live;
+      this->preroll_[index].source = preroll;
+    }
+  }
+  void select_stream(int index) {
+    this->selected_stream_.store((index >= 0 && index < MAX_STREAMS) ? index : OUTPUT_STREAM);
+  }
+  int get_selected_stream() const { return this->selected_stream_.load(); }
   void reset_conversation_id();
 
   Trigger<> *get_intent_end_trigger() { return &this->intent_end_trigger_; }
@@ -293,15 +310,29 @@ class VoiceAssistant final : public Component {
   // source on the microphone's thread. On a wake-word start the last preroll_ms_ of it goes
   // into the ring buffer ahead of the live audio.
   size_t ring_buffer_size_() const;
-  void apply_preroll_();
-  microphone::MicrophoneSource *preroll_source_{nullptr};
+  void apply_preroll_(int stream);
   uint32_t preroll_ms_{0};
-  uint8_t *preroll_history_{nullptr};
-  size_t preroll_history_size_{0};
-  size_t preroll_write_pos_{0};
-  size_t preroll_filled_{0};
-  Mutex preroll_lock_;
+  // One history per stream (stream selection patch); index OUTPUT_STREAM is the normal
+  // microphone's.
+  struct PrerollHistory {
+    microphone::MicrophoneSource *source{nullptr};
+    uint8_t *buf{nullptr};
+    size_t size{0};
+    size_t pos{0};
+    size_t filled{0};
+    Mutex lock;
+  };
+  PrerollHistory preroll_[MAX_STREAMS];
+  void record_preroll_(PrerollHistory &h, const std::vector<uint8_t> &data);
   bool preroll_armed_{false};
+  // Stream selection patch
+  microphone::MicrophoneSource *stream_live_[MAX_STREAMS]{};  // OUTPUT_STREAM: unused (mic_source_)
+  std::atomic<int> selected_stream_{OUTPUT_STREAM};           // for the next run
+  std::atomic<int> active_stream_{OUTPUT_STREAM};             // of the current run
+  int live_started_{-1};                                      // stream whose live source was started
+  std::atomic<uint32_t> stream_last_data_ms_{0};
+  std::atomic<bool> stream_fell_back_{false};
+  void write_stream_(int stream, const std::vector<uint8_t> &data);
   // Set while the passive source forwards live audio, from the pre-roll copy until the
   // main source delivers its first chunk (no gap, no duplicate).
   std::atomic<bool> preroll_forwarding_{false};

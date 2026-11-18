@@ -48,6 +48,8 @@ CONF_WAKE_WORD = "wake_word"
 CONF_CONVERSATION_TIMEOUT = "conversation_timeout"
 # Pre-roll patch (rgitha): audio from before the wake word fired
 CONF_WAKE_WORD_PREROLL = "wake_word_preroll"
+# Stream selection patch: separated (BSS) streams as alternative sources for STT
+CONF_STREAM_MICROPHONES = "stream_microphones"
 PREROLL_CAPACITY_MS = 1000
 
 CONF_ON_TIMER_STARTED = "on_timer_started"
@@ -94,6 +96,19 @@ CONFIG_SCHEMA = cv.All(
                     max=MAX_MICROPHONE_SOURCES,
                     msg=f"Voice Assistant supports at most {MAX_MICROPHONE_SOURCES} microphone sources",
                 ),
+            ),
+            # Stream selection patch: stream 0 and 1 (stream 2 is `microphone`); the
+            # stream for a run is chosen with select_stream()
+            cv.Optional(CONF_STREAM_MICROPHONES): cv.All(
+                cv.ensure_list(
+                    microphone.microphone_source_schema(
+                        min_bits_per_sample=16,
+                        max_bits_per_sample=16,
+                        min_channels=1,
+                        max_channels=1,
+                    )
+                ),
+                cv.Length(min=1, max=2),
             ),
             cv.Exclusive(CONF_MEDIA_PLAYER, "output"): cv.use_id(
                 media_player.MediaPlayer
@@ -187,6 +202,11 @@ FINAL_VALIDATE_SCHEMA = cv.All(
                     "voice_assistant", sample_rate=16000
                 )
             ),
+            cv.Optional(CONF_STREAM_MICROPHONES): cv.ensure_list(
+                microphone.final_validate_microphone_source_schema(
+                    "voice_assistant", sample_rate=16000
+                )
+            ),
         },
         extra=cv.ALLOW_EXTRA,
     ),
@@ -238,6 +258,19 @@ async def to_code(config: ConfigType) -> None:
         preroll_source = await microphone.microphone_source_to_code(src, passive=True)
         cg.add(var.set_preroll_source(preroll_source))
         cg.add(var.set_wake_word_preroll(preroll_ms))
+
+    # Stream selection patch: a live source per separated stream, and a passive one for
+    # its pre-roll history
+    for index, stream_conf in enumerate(config.get(CONF_STREAM_MICROPHONES, [])):
+        live = await microphone.microphone_source_to_code(stream_conf)
+        preroll = cg.nullptr
+        if preroll_ms > 0:
+            src = dict(stream_conf)
+            src[CONF_ID] = cv.declare_id(microphone.MicrophoneSource)(
+                f"{config[CONF_ID].id}_stream{index}_preroll_source"
+            )
+            preroll = await microphone.microphone_source_to_code(src, passive=True)
+        cg.add(var.add_stream_microphone(index, live, preroll))
 
     if CONF_ON_LISTENING in config:
         await automation.build_automation(
