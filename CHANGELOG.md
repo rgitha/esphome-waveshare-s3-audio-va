@@ -4,6 +4,11 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.18
 
+- **.8** (TEST, branch dual-mww; now esphome-va-1-test.yaml, friendly name
+  "Voice Assistant 1 Test") Wake word tasks pinned to a core (new task_core option
+  in the micro_wake_word copy): raw 0 and output on core 0, raw 1 on core 1. Until
+  now each task stayed on whichever core it first used, often both separated
+  streams on core 1 with the AFE feed, which overflowed during replies.
 - **.7** (TEST, branch dual-mww) Runtime controls to measure CPU against quality:
   AFE mode (sr_high_perf / sr_low_cost), echo filter length (2-4), AFE VAD on/off,
   and each wake word instance (raw 0, raw 1, output) on/off.

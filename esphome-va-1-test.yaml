@@ -13,10 +13,10 @@
 
 substitutions:
   device_name: esphome-va-1
-  friendly: "Voice Assistant 1"
+  friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.7"
+  fw_version: "2026.11.18.8"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -57,7 +57,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 9f60d2cdc75f0dff2ddd9df322d41e35aea56203
+  repo_ref: e4d588e97586551809c1822c25ee45e6e8c40c86
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -903,6 +903,7 @@ micro_wake_word:
   # which acts on the first; every detection or VAD veto also produces one
   # comparison line with each stream's peak probability (compare_streams).
   - id: mww
+    task_core: 0 # TEST: pinned (raw 0 and output on core 0, raw 1 on core 1)
     # Larger audio buffer to absorb brief inference delays (default 120 ms).
     # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
     # merged to dev 2026-10-18; not in 2026.9 / 2026.10).
@@ -940,6 +941,7 @@ micro_wake_word:
           wake_word: !lambda return wake_word;
           trigger: "VAD veto on raw 0"
   - id: mww_b
+    task_core: 1 # TEST: pinned
     # Larger audio buffer to absorb brief inference delays (default 120 ms).
     # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
     # merged to dev 2026-10-18; not in 2026.9 / 2026.10).
@@ -978,6 +980,7 @@ micro_wake_word:
           trigger: "VAD veto on raw 1"
 
   - id: mww_c # TEST ONLY: the unseparated output, for comparison; remove for production
+    task_core: 0 # TEST: pinned
     # Larger audio buffer to absorb brief inference delays (default 120 ms).
     # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
     # merged to dev 2026-10-18; not in 2026.9 / 2026.10).
