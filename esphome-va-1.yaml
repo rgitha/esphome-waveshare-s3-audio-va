@@ -587,10 +587,10 @@ light:
 external_components:
   # Fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus Espressif's GMF AI Audio
   # 1.1.2 from the component registry (instead of the n-IA-hane/esp-gmf fork) and the
-  # output boost (set_output_boost_db). Branch boost, pinned by commit.
+  # output boost (set_output_boost_db). Branch rgitha-v2026.11.0, pinned by commit.
   - source: github://rgitha/esphome-audio-stack@d3e38c165e823acd97c6c32939f90dbc5db23f9c
     components: [esp_audio_stack, esp_afe]
-  # v0.4.4 (branch boost-out), pinned by commit
+  # v0.4.4 (branch main), pinned by commit
   - source: github://rgitha/esphome-adaptive-volume@8db7c7113402045ee140d9fba0e2fb5536d3434f
     components: [adaptive_volume]
   # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
