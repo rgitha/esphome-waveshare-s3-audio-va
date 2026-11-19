@@ -22,6 +22,8 @@ CONF_LEVEL_THRESHOLD = "level_threshold"
 CONF_SWAP_MICS = "swap_mics"
 CONF_ANGLE = "angle"
 CONF_TASK_CORE = "task_core"
+CONF_START_DELAY = "start_delay"
+CONF_MIN_FREE_INTERNAL = "min_free_internal"
 
 doa_probe_ns = cg.esphome_ns.namespace("doa_probe")
 DoaProbe = doa_probe_ns.class_("DoaProbe", cg.Component)
@@ -40,6 +42,11 @@ CONFIG_SCHEMA = cv.Schema(
         # transport mic 0 is passed as "right", mic 1 as "left"; swap if the angle runs backwards
         cv.Optional(CONF_SWAP_MICS, default=False): cv.boolean,
         cv.Optional(CONF_TASK_CORE, default=0): cv.int_range(min=0, max=1),
+        # start this long after boot (after ESPHome has marked the boot good), so a
+        # crash in the probe cannot lock the device into safe mode and OTA stays possible
+        cv.Optional(CONF_START_DELAY, default="90s"): cv.positive_time_period_milliseconds,
+        # do not start if less internal RAM than this is free (bytes)
+        cv.Optional(CONF_MIN_FREE_INTERNAL, default=16000): cv.int_range(min=0, max=200000),
         cv.Optional(CONF_ANGLE): sensor.sensor_schema(
             unit_of_measurement="°",
             accuracy_decimals=0,
@@ -62,6 +69,8 @@ async def to_code(config):
     cg.add(var.set_level_threshold(config[CONF_LEVEL_THRESHOLD]))
     cg.add(var.set_swap_mics(config[CONF_SWAP_MICS]))
     cg.add(var.set_task_core(config[CONF_TASK_CORE]))
+    cg.add(var.set_start_delay(config[CONF_START_DELAY]))
+    cg.add(var.set_min_free_internal(config[CONF_MIN_FREE_INTERNAL]))
     if CONF_ANGLE in config:
         s = await sensor.new_sensor(config[CONF_ANGLE])
         cg.add(var.set_angle_sensor(s))

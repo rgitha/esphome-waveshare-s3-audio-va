@@ -6,7 +6,6 @@
 #include "esphome/core/log.h"
 
 #include <esp_heap_caps.h>
-#include <freertos/idf_additions.h>
 
 #include <algorithm>
 #include <cmath>
@@ -21,7 +20,7 @@ namespace esphome::doa_probe {
 static const char *const TAG = "doa_probe";
 static constexpr int SAMPLE_RATE = 16000;
 static constexpr size_t RING_BYTES = SAMPLE_RATE / 2 * 2 * sizeof(int16_t);  // 0.5 s, two channels
-static constexpr uint32_t TASK_STACK = 8192;
+static constexpr uint32_t TASK_STACK = 6144;  // internal RAM
 
 static float level_dbfs(const int16_t *a, const int16_t *b, int n) {
   double sum = 0;
@@ -31,26 +30,57 @@ static float level_dbfs(const int16_t *a, const int16_t *b, int n) {
   return ms > 1e-12 ? 10.0f * std::log10((float) ms) : -120.0f;
 }
 
-void DoaProbe::setup() {
-  this->ring_ = ring_buffer::RingBuffer::create(RING_BYTES);
-  this->doa_ = esp_doa_create(SAMPLE_RATE, this->resolution_, this->mic_distance_, this->frame_samples_);
-  if (!this->ring_ || this->doa_ == nullptr) {
-    ESP_LOGE(TAG, "Allocation failed (ring %s, doa %s)", this->ring_ ? "ok" : "failed",
-             this->doa_ ? "ok" : "failed");
-    this->mark_failed();
+// Nothing is allocated or started at boot: start_() runs start_delay after boot.
+void DoaProbe::setup() {}
+
+static size_t free_internal() { return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); }
+
+void DoaProbe::start_() {
+  const size_t free0 = free_internal();
+  const size_t block0 = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  ESP_LOGI(TAG, "Starting: internal RAM free %u (largest block %u)", (unsigned) free0, (unsigned) block0);
+  if (free0 < this->min_free_internal_ || block0 < TASK_STACK + 1024) {
+    ESP_LOGE(TAG, "Not starting: too little internal RAM (need %u free, %u block)",
+             (unsigned) this->min_free_internal_, (unsigned) (TASK_STACK + 1024));
+    this->state_ = State::GAVE_UP;
     return;
   }
-  if (xTaskCreatePinnedToCoreWithCaps(&DoaProbe::task_, "doa", TASK_STACK, this, 2, &this->task_handle_,
-                                      this->task_core_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+  this->ring_ = ring_buffer::RingBuffer::create(RING_BYTES);
+  if (!this->ring_) {
+    ESP_LOGE(TAG, "Ring buffer allocation failed");
+    this->state_ = State::GAVE_UP;
+    return;
+  }
+  this->doa_ = esp_doa_create(SAMPLE_RATE, this->resolution_, this->mic_distance_, this->frame_samples_);
+  const size_t free1 = free_internal();
+  ESP_LOGI(TAG, "esp_doa_create: %s, internal RAM used %d (free %u)", this->doa_ ? "ok" : "FAILED",
+           (int) free0 - (int) free1, (unsigned) free1);
+  if (this->doa_ == nullptr) {
+    this->state_ = State::GAVE_UP;
+    return;
+  }
+  if (free1 < this->min_free_internal_ / 2) {
+    ESP_LOGE(TAG, "Not starting: esp_doa left too little internal RAM");
+    esp_doa_destroy(this->doa_);
+    this->doa_ = nullptr;
+    this->state_ = State::GAVE_UP;
+    return;
+  }
+  if (xTaskCreatePinnedToCore(&DoaProbe::task_, "doa", TASK_STACK, this, 2, &this->task_handle_,
+                              this->task_core_) != pdPASS) {
     ESP_LOGE(TAG, "Task creation failed");
-    this->mark_failed();
+    this->state_ = State::GAVE_UP;
     return;
   }
   if (!this->afe_->add_mic_tap(&DoaProbe::mic_tap_cb_, this) ||
       !this->afe_->add_result_tap(&DoaProbe::result_tap_cb_, this)) {
     ESP_LOGE(TAG, "No free AFE tap");
-    this->mark_failed();
+    this->state_ = State::GAVE_UP;
+    return;
   }
+  this->state_ = State::RUNNING;
+  this->last_log_ms_ = millis();
+  ESP_LOGI(TAG, "Running (internal RAM free %u)", (unsigned) free_internal());
 }
 
 void DoaProbe::dump_config() {
@@ -61,10 +91,11 @@ void DoaProbe::dump_config() {
                 "  Frame: %d samples (%d ms)\n"
                 "  Level threshold: %.0f dBFS\n"
                 "  Mics swapped: %s\n"
-                "  Task core: %d",
+                "  Task core: %d\n"
+                "  Starts %u s after boot",
                 this->mic_distance_, this->resolution_, this->frame_samples_,
                 this->frame_samples_ * 1000 / SAMPLE_RATE, this->level_threshold_db_, YESNO(this->swap_mics_),
-                this->task_core_);
+                this->task_core_, (unsigned) (this->start_delay_ms_ / 1000));
 }
 
 void DoaProbe::mic_tap_cb_(const esp_afe::EspAfe::MicTap &tap, void *ctx) {
@@ -179,6 +210,13 @@ void DoaProbe::summarize_(uint32_t since_ms, uint32_t now, const char *label, bo
 
 void DoaProbe::loop() {
   const uint32_t now = millis();
+  if (this->state_ == State::WAITING) {
+    if (now >= this->start_delay_ms_)
+      this->start_();
+    return;
+  }
+  if (this->state_ != State::RUNNING)
+    return;
   if (now - this->last_log_ms_ < this->log_interval_ms_)
     return;
   this->summarize_(this->last_log_ms_, now, "DOA", true);
@@ -186,6 +224,8 @@ void DoaProbe::loop() {
 }
 
 void DoaProbe::log_event(const std::string &label) {
+  if (this->state_ != State::RUNNING)
+    return;
   const uint32_t now = millis();
   const std::string l = "DOA at " + label;
   this->summarize_(now - 2000, now, l.c_str(), false);

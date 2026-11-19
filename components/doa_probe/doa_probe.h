@@ -28,6 +28,8 @@ class DoaProbe : public Component {
   void set_level_threshold(float db) { this->level_threshold_db_ = db; }
   void set_swap_mics(bool swap) { this->swap_mics_ = swap; }
   void set_task_core(int core) { this->task_core_ = core; }
+  void set_start_delay(uint32_t ms) { this->start_delay_ms_ = ms; }
+  void set_min_free_internal(uint32_t bytes) { this->min_free_internal_ = bytes; }
   void set_angle_sensor(sensor::Sensor *s) { this->angle_sensor_ = s; }
 
   void setup() override;
@@ -43,6 +45,7 @@ class DoaProbe : public Component {
   static void result_tap_cb_(const esp_afe::EspAfe::ResultTap &tap, void *ctx);
   static void task_(void *arg);
   void summarize_(uint32_t since_ms, uint32_t now, const char *label, bool publish);
+  void start_();
 
   esp_afe::EspAfe *afe_{nullptr};
   sensor::Sensor *angle_sensor_{nullptr};
@@ -53,6 +56,9 @@ class DoaProbe : public Component {
   float level_threshold_db_{-60.0f};
   bool swap_mics_{false};
   int task_core_{0};
+  uint32_t start_delay_ms_{90000};
+  uint32_t min_free_internal_{16000};
+  enum class State { WAITING, RUNNING, GAVE_UP } state_{State::WAITING};
 
   std::unique_ptr<ring_buffer::RingBuffer> ring_;
   doa_handle_t *doa_{nullptr};
