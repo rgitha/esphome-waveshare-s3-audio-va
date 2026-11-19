@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.20.2"
+  fw_version: "2026.11.20.4"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -59,7 +59,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 0a43d3263eeb690e078af2ef11c174d92e120e23
+  repo_ref: e66358b25d5980513188a4fad72ff3c72d3db96f
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -111,6 +111,12 @@ substitutions:
   # TEST (DOA probe): distance between the two microphones (mic holes, centre to
   # centre), metres
   doa_mic_distance: "0.035"
+  # TEST (DOA probe): LED display. doa_led_ref: the LED index at 90 deg (broadside,
+  # square to the line joining the mics). doa_led_dir: +1 if the right mic's side
+  # (0 deg) is towards higher LED indices, -1 if towards lower (flip if the display
+  # shows the mirror image).
+  doa_led_ref: "0"
+  doa_led_dir: "1"
 
 # Pre-configured camera code
 # exposes UI controls to Homeassistant
@@ -612,13 +618,31 @@ light:
               default: live(scene, ms_since(now, live0), out);
             }
 
+            // ---- TEST (DOA probe): teal on the LEDs nearest the measured direction and its
+            // mirror image across the mic line (two mics cannot tell which); shown only,
+            // not kept in frame[] ----
+            Col shown[N];
+            for (int i = 0; i < N; i++) shown[i] = out[i];
+            if (id(doa_leds).state) {
+              const float ang = id(doa).get_live_angle();
+              if (!std::isnan(ang)) {
+                const Col TEAL{0.0f, 0.6f, 0.55f};
+                auto led_for = [&](float phi) {  // phi: deg from the right mic's side
+                  const float steps = (phi - 90.0f) / (360.0f / N) * ${doa_led_dir};
+                  return (((${doa_led_ref} + static_cast<int>(lroundf(steps))) % N) + N) % N;
+                };
+                shown[led_for(ang)] = TEAL;
+                shown[led_for(360.0f - ang)] = TEAL;
+              }
+            }
+
             // ---- output: the light applies the ring brightness (current_color) and the gamma ----
             const float b = std::max(current_color.r, std::max(current_color.g, current_color.b)) / 255.0f;
             for (int i = 0; i < N; i++) {
               frame[i] = out[i];
-              it[i] = Color(static_cast<uint8_t>(clampf(out[i].r * b, 0, 1) * 255.0f + 0.5f),
-                            static_cast<uint8_t>(clampf(out[i].g * b, 0, 1) * 255.0f + 0.5f),
-                            static_cast<uint8_t>(clampf(out[i].b * b, 0, 1) * 255.0f + 0.5f));
+              it[i] = Color(static_cast<uint8_t>(clampf(shown[i].r * b, 0, 1) * 255.0f + 0.5f),
+                            static_cast<uint8_t>(clampf(shown[i].g * b, 0, 1) * 255.0f + 0.5f),
+                            static_cast<uint8_t>(clampf(shown[i].b * b, 0, 1) * 255.0f + 0.5f));
             }
       # Boot / initialisation
       - addressable_rainbow:
@@ -927,13 +951,14 @@ media_player:
             - script.execute: control_leds_volume_changed
 
 # TEST (DOA probe): direction of arrival from the two raw mics (before the AFE),
-# Espressif esp_doa (SRP-PHAT), 0-180 degrees (two mics cannot tell front from back).
+# SRP-PHAT (own implementation, buffers in PSRAM), 0-180 degrees: 0 = right mic's
+# side, 90 = broadside, 180 = left mic's side (two mics cannot tell front from back).
 # Every 2 s a log line with the median angle of the loud frames and the levels of
 # raw 0, raw 1 and the unseparated raw 2; one more at each wake word.
 doa_probe:
   id: doa
   mic_distance: ${doa_mic_distance}
-  resolution: 10
+  resolution: 2
   frame_samples: 1024
   log_interval: 2s
   level_threshold: -60
@@ -2015,6 +2040,14 @@ select:
             id(saved_alarm_action) = x;
 
 switch:
+  # TEST (DOA probe): show the measured direction on the ring (teal)
+  - platform: template
+    id: doa_leds
+    name: "DOA LEDs (test)"
+    icon: mdi:compass-outline
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
   # Echo cancellation on/off for A/B testing (keep on for normal use). The
   # speaker level calibration needs it on; while off, calibration pauses.
   - platform: esp_afe
