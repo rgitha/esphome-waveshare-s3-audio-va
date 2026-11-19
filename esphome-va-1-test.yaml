@@ -16,24 +16,26 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.11"
+  fw_version: "2026.11.20.1"
 
   # ---- Tunables -------------------------------------------------------------
 
-  # Adaptive volume: attenuation A = clamp(S - room noise - (C + offset), 0, max),
+  # ---- Output levels (dB) ----
+  # Adaptive volume reduction: A = clamp(S - room noise - (C + trim), 0, max),
   # S = speaker-to-mic path gain + analogue gain (measured, constant for the hardware)
-  loudness_constant_db: "26"  # C: reply this far above the room at full slider (assumes the speaker output 46 dB below full scale); the HA offset adds -6..+6
+  loudness_constant_db: "29"  # C: reply this far above the room at full slider (assumes the speaker output 46 dB below full scale); the HA trim adds -6..+6
+  # Boosts over the media player volume (the reply level), applied by the audio stack
+  # after the mixer; the total is capped at 0 dBFS, so near full volume a boost has
+  # less effect. Independent of adaptive volume. Announcement and music boosts are HA
+  # settings (-6..+6 dB, 3 dB steps); these are their first-boot values. Chimes,
+  # replies and timers/alarms get no boost.
+  announcement_boost_db: "6"  # HA announcements (assist_satellite.announce, with the pre-announcement chime)
+  music_boost_db: "6"         # music (http media and Sendspin)
+  urgent_boost_db: "6"        # extra, for the next announcement after the urgent_announcement action
   max_attenuation_db: "30"    # largest adaptive reduction
   # Volume range (each used in two places, so they cannot drift apart)
   master_volume_min_db: "-40" # codec master volume floor (audio stack and adaptive volume)
   media_volume_min: "0.1"     # media player volume_min (media player and adaptive volume)
-
-  # Output offsets over the adapted volume for HA announcements (assist_satellite.announce,
-  # including the pre-announcement chime), dB. Applied by lowering the adaptive
-  # reduction, so the ceiling is 0 dB (no effect when the reduction is 0).
-  # Chimes, TTS replies and timers/alarms get no offset.
-  announcement_offset_db: "6"
-  urgent_offset_db: "6"       # extra, for the next announcement after the set_announcement_offset action
 
   es7210_gain_db: "24.0" # mic ADC gain, fixed at boot; 3 dB steps. 24 + Mic Gain trim 15 = speech about -27 dBFS at arm's length
   # Front-end mic mode (build time; changing it needs Clean Build Files):
@@ -49,7 +51,7 @@ substitutions:
   # LED transitions (ms): crossfades and the fill from / empty into the pilot take this
   # long; the thinking comet, and the moves into and out of it, go round in twice this.
   led_transition_ms: '250'
-  pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
+  pilot_level: '35' # pilot light level, % of the ring brightness
 
   hidden_ssid: "false"
 
@@ -57,7 +59,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: b2a8442ca769f15a928fb7777f53725a9dc4bf35
+  repo_ref: 4845a5a283c05ec729cba8ec55619f15dd6bbda6
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -96,6 +98,19 @@ substitutions:
   voice_assist_reply_pending_phase_id: '6' # reply handed to TTS, audio not playing yet
   voice_assist_not_ready_phase_id: '10' # not ready
   voice_assist_error_phase_id: '11' # encountered an error
+
+  # ---- Test parameters: DO NOT TOUCH ------------------------------------------
+  # Fixed values of the former HA test controls of the dual wake word build
+  # (docs/dual-wake-word.md). Change only for a deliberate test.
+  afe_mode: low_cost            # AFE mode: low_cost / high_perf (only echo cancellation differs; high_perf ~15-20 points more CPU during playback, ~10 KB more internal RAM)
+  afe_echo_filter_length: "4"   # echo filter length 2..4: no measurable CPU effect
+  afe_vad: "true"               # Espressif AFE VAD (feeds the Voice Detected sensor only; no CPU saving when off)
+  wake_word_raw0: "true"        # wake word instance on BSS stream raw 0
+  wake_word_raw1: "true"        # wake word instance on BSS stream raw 1
+  wake_word_output: "false"     # third instance on the unseparated output, for comparison only (with both above: model time exceeds the shared inference lock, overflows)
+  # TEST (DOA probe): distance between the two microphones (mic holes, centre to
+  # centre), metres
+  doa_mic_distance: "0.035"
 
 # Pre-configured camera code
 # exposes UI controls to Homeassistant
@@ -150,7 +165,7 @@ esp32:
     advanced:
       compiler_optimization: PERF # AFE + wake word are CPU heavy
     sdkconfig_options:
-      # TEST (dual wake word): FreeRTOS run-time statistics for the CPU log below
+      # FreeRTOS run-time statistics for the CPU load log and sensors (interval at the end)
       CONFIG_FREERTOS_USE_TRACE_FACILITY: "y"
       CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS: "y"
       CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64: "y"
@@ -218,7 +233,7 @@ api:
             id(led_ring_color_b) = std::min(1.0f, std::max(0.0f, blue));
     - action: start_va
       then:
-        # TEST (stream selection): no wake word chose a stream -> the output
+        # no wake word chose a stream -> STT gets the output (stream 2)
         - lambda: id(va).select_stream(2);
         - voice_assistant.start
     - action: stop_va
@@ -236,9 +251,9 @@ api:
                 id(saved_alarm_time) = alarm_time_hh_mm;
               }
     # Urgent announcement: call just before assist_satellite.announce; the
-    # next HA announcement within 10 s gets
-    # urgent_offset_db on top of announcement_offset_db.
-    - action: set_announcement_offset
+    # next HA announcement within 10 s gets urgent_boost_db on top of the
+    # announcement boost.
+    - action: urgent_announcement
       then:
         - lambda: |-
             id(urgent_pending) = true;
@@ -285,7 +300,7 @@ ota:
               const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
               // the strip's colour correction applies the ring brightness and gamma;
               // the dim level matches the pilot light
-              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_dim}, 0);
+              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_level} * 255 / 100, 0);
             }
             strip->write_state(id(status_ring));  // id() is already the LightState pointer
     on_progress:
@@ -307,7 +322,7 @@ ota:
               const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
               // the strip's colour correction applies the ring brightness and gamma;
               // the dim level matches the pilot light
-              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_dim}, 0);
+              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_level} * 255 / 100, 0);
             }
             strip->write_state(id(status_ring));  // id() is already the LightState pointer
     on_error:
@@ -320,22 +335,22 @@ ota:
             g: 0.0
             b: 0.0
         - delay: 3s
-        # TEST: only the wake word instances whose switch is on
+        # only the wake word instances enabled in the test parameters
         - if:
             condition:
-              switch.is_on: mww_raw0_switch
+              lambda: return ${wake_word_raw0};
             then:
               - micro_wake_word.start:
                   id: mww
         - if:
             condition:
-              switch.is_on: mww_raw1_switch
+              lambda: return ${wake_word_raw1};
             then:
               - micro_wake_word.start:
                   id: mww_b
         - if:
             condition:
-              switch.is_on: mww_output_switch
+              lambda: return ${wake_word_output};
             then:
               - micro_wake_word.start:
                   id: mww_c
@@ -412,7 +427,7 @@ light:
             constexpr int TAIL = N - 1;                                   // comet tail: the whole ring
             const float D = ${led_transition_ms};
             const float STEP = D / N, CSTEP = 2.0f * D / N;               // fills: a circle in D; comet: in 2 x D
-            const float PILOT = ${pilot_dim} / 255.0f, BG = PILOT / 2;    // comet background: half the pilot level
+            const float PILOT = ${pilot_level} / 100.0f, BG = PILOT / 2;    // comet background: half the pilot level
             enum { IDLE, RING, FLASH, BREATHE_SLOW, BREATHE_FAST, SPIN, TIMER, VOLUME };
             enum { NONE, XFADE, FILL, GATHER, TO_PULSE, EMPTY, SPIN_TO_IDLE };
             struct Col { float r, g, b; };
@@ -612,22 +627,23 @@ light:
           width: 7
 
 external_components:
-  # Backup fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus one commit that
-  # takes Espressif's GMF AI Audio 1.1.2 from the component registry instead of
-  # the n-IA-hane/esp-gmf fork. Pinned by commit.
-  # TEST (dual wake word): branch dual-mww, which adds the AFE result tap and the
-  # esp_afe microphone platform (raw_data channels as microphones).
-  - source: github://rgitha/esphome-audio-stack@cba4fbc2a8fac34d76a3e20e482ada00ea37fb57
+  # Fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus Espressif's GMF AI Audio
+  # 1.1.2 from the component registry (instead of the n-IA-hane/esp-gmf fork), the
+  # output boost (set_output_boost_db), and the AFE result tap with the esp_afe
+  # microphone platform (raw_data channels as microphones, for wake word on the BSS
+  # streams). Branch rgitha-v2026.11.0, pinned by commit.
+  # TEST (DOA probe): branch doa, which adds the esp_afe mic tap (raw mics before the AFE)
+  - source: github://rgitha/esphome-audio-stack@28e83c58d6872a62eea74652019100636c7c1e34
     components: [esp_audio_stack, esp_afe]
-  # v0.4.3, pinned by commit
-  - source: github://rgitha/esphome-adaptive-volume@dd7a8f72891f5373fa9a54cd6279b8fee920751b
+  # v0.4.4 (branch main), pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@8db7c7113402045ee140d9fba0e2fb5536d3434f
     components: [adaptive_volume]
   # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
   # repository's components/ at repo_ref
-  # TEST (dual wake word): micro_wake_word from ESPHome 2026.10.2, patched to allow
-  # two instances (branch dual-mww)
+  # and micro_wake_word from ESPHome 2026.10.2, patched for several instances (wake
+  # word on each BSS stream), task_core pinning, ring_buffer_duration and diagnostics
   - source: github://rgitha/esphome-waveshare-s3-audio-va@${repo_ref}
-    components: [voice_assistant, micro_wake_word]
+    components: [voice_assistant, micro_wake_word, doa_probe]
 
 # Audio hardware: one shared I2S bus in 4-slot TDM at 48 kHz.
 # ES7210 slots: 0 = right mic, 2 = left mic, 1 = ES8311 playback reference, 3 = unused
@@ -682,14 +698,13 @@ esp_afe:
   type: sr            # speech recognition: linear AEC, keeps the spectrum intact for
                       # wake word / STT. "fd" (intercom default) adds nonlinear
                       # processing for two-way calls and lowered STT accuracy here.
-  mode: low_cost      # echo cancellation about as effective as high_perf, ~15-20 points less
-                      # CPU during playback, ~10 KB less internal RAM (only AEC differs)
+  mode: ${afe_mode}   # see the test parameters
   mic_num: ${afe_mic_num}  # see the afe_mic_num substitution
   se_enabled: ${afe_dual}  # dual-mic speech enhancement (BSS); BSS cannot be toggled at runtime
-  aec_filter_length: 4
+  aec_filter_length: ${afe_echo_filter_length}
   aec_nlp_level: normal # only used by vc/fd types
   ns_enabled: false   # no effect with 2 mics (BSS takes precedence); off so 1-mic tests compare like for like
-  vad_enabled: true
+  vad_enabled: ${afe_vad}
   continuous_vad: true
   agc_enabled: false
   memory_alloc_mode: more_psram
@@ -711,7 +726,7 @@ esp_afe:
 # In a quiet room all sound is turned down via the codec master volume; the HA
 # volume slider is the level in a loud room and never moves. The device
 # calibrates itself on its own spoken replies (speaker level S).
-# Attenuation A = clamp(S - room noise - (loudness_constant + offset), 0, max).
+# Attenuation A = clamp(S - room noise - (loudness_constant + trim), 0, max).
 adaptive_volume:
   id: adaptive
   esp_audio_stack_id: audio_stack
@@ -741,23 +756,22 @@ adaptive_volume:
   master_volume_min_db: ${master_volume_min_db}
   media_volume_min: ${media_volume_min}
   enable:
-    name: Adaptive volume
+    name: Adaptive volume reduction
     entity_category: config
   offset:
-    name: Adaptive volume offset
+    name: Adaptive volume trim
     mode: slider
   room_noise:
     name: Room noise
   # Path gain speaker -> mic: the median in use, and each reply's (diagnostics)
   path_gain:
     name: Speaker path gain
+    disabled_by_default: true
   path_gain_reply:
     name: Speaker path gain (last reply)
-  # Old reply level method, for comparison (diagnostic)
-  speaker_level_reply:
-    name: Speaker level (last reply)
+    disabled_by_default: true
   attenuation:
-    name: Adaptive volume reduction
+    name: Adaptive reduction level
   current_volume:
     name: Current volume
   # Diagnostic after each stretch of playback (1.5 s or longer)
@@ -767,7 +781,7 @@ adaptive_volume:
 microphone:
   - platform: esp_audio_stack
     id: afe_mic
-  # TEST (dual wake word): the two separated (BSS) streams as microphones, one wake
+  # The two separated (BSS) streams as microphones, one wake
   # word instance each. raw_data channel 2 is the unseparated stream afe_mic delivers.
   # Mic Gain trim applied as on afe_mic; starting either keeps afe_mic (the pipeline) running.
   - platform: esp_afe
@@ -884,19 +898,20 @@ media_player:
                 id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
             - script.execute: control_leds
     on_state:
-      if:
-        condition:
-          and:
-            - switch.is_off: timer_ringing
-            - not:
-                voice_assistant.is_running:
-            - not:
-                media_player.is_announcing: external_media_player
-        then:
-          - mixer_speaker.apply_ducking:
-              id: media_mixing_input
-              decibel_reduction: 0
-              duration: 1.0s
+      - script.execute: update_boost
+      - if:
+          condition:
+            and:
+              - switch.is_off: timer_ringing
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing: external_media_player
+          then:
+            - mixer_speaker.apply_ducking:
+                id: media_mixing_input
+                decibel_reduction: 0
+                duration: 1.0s
     on_mute:
       - delay: 100ms  # Debounce
       - script.execute: control_leds_volume_changed
@@ -911,22 +926,37 @@ media_player:
             - delay: 100ms  # Debounce
             - script.execute: control_leds_volume_changed
 
+# TEST (DOA probe): direction of arrival from the two raw mics (before the AFE),
+# Espressif esp_doa (SRP-PHAT), 0-180 degrees (two mics cannot tell front from back).
+# Every 2 s a log line with the median angle of the loud frames and the levels of
+# raw 0, raw 1 and the unseparated raw 2; one more at each wake word.
+doa_probe:
+  id: doa
+  mic_distance: ${doa_mic_distance}
+  resolution: 10
+  frame_samples: 1024
+  log_interval: 2s
+  level_threshold: -60
+  task_core: 0
+  angle:
+    name: DOA angle
+
 micro_wake_word:
-  # TEST (dual wake word): one instance per separated (BSS) stream, each with all
-  # models, plus (test only) one on the unseparated output for comparison. mww
+  # One instance per separated (BSS) stream, each with all models, plus one on the
+  # unseparated output for comparison (started only if wake_word_output is true). mww
   # follows Home Assistant's wake word choice; mww_b and mww_c copy mww's enabled
   # wake words and cutoffs (interval below). Detections go to the on_wake script,
   # which acts on the first; every detection or VAD veto also produces one
   # comparison line with each stream's peak probability (compare_streams).
   - id: mww
-    task_core: 0 # TEST: pinned (raw 0 and output on core 0, raw 1 on core 1)
+    task_core: 0 # pinned (raw 0 and output on core 0, raw 1 on core 1)
     # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
     # bursts when playback starts (option in the local micro_wake_word copy; same name
     # as esphome/esphome PR #20942)
     ring_buffer_duration: 500ms
     microphone:
       id: mww_mic
-      microphone: afe_raw0 # TEST: separated stream raw 0 (was afe_mic, the unseparated output)
+      microphone: afe_raw0 # separated stream raw 0
       gain_factor: 1 # digital gain; use the Mic Gain trim instead
     task_stack_in_psram: true
     stop_after_detection: false
@@ -957,14 +987,14 @@ micro_wake_word:
           wake_word: !lambda return wake_word;
           trigger: "VAD veto on raw 0"
   - id: mww_b
-    task_core: 1 # TEST: pinned
+    task_core: 1 # pinned
     # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
     # bursts when playback starts (option in the local micro_wake_word copy; same name
     # as esphome/esphome PR #20942)
     ring_buffer_duration: 500ms
     microphone:
       id: mww_b_mic
-      microphone: afe_raw1 # TEST: separated stream raw 1
+      microphone: afe_raw1 # separated stream raw 1
       gain_factor: 1 # digital gain; use the Mic Gain trim instead
     task_stack_in_psram: true
     stop_after_detection: false
@@ -995,15 +1025,15 @@ micro_wake_word:
           wake_word: !lambda return wake_word;
           trigger: "VAD veto on raw 1"
 
-  - id: mww_c # TEST ONLY: the unseparated output, for comparison; remove for production
-    task_core: 0 # TEST: pinned
+  - id: mww_c # the unseparated output, for comparison only (wake_word_output)
+    task_core: 0 # pinned
     # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
     # bursts when playback starts (option in the local micro_wake_word copy; same name
     # as esphome/esphome PR #20942)
     ring_buffer_duration: 500ms
     microphone:
       id: mww_c_mic
-      microphone: afe_mic # TEST ONLY: unseparated output (what production used until now)
+      microphone: afe_mic # unseparated output
       gain_factor: 1 # digital gain; use the Mic Gain trim instead
     task_stack_in_psram: true
     stop_after_detection: false
@@ -1047,7 +1077,7 @@ voice_assistant:
     # Using diff channel from mww so that some gain settings can apply properly?
     # https://github.com/esphome/esphome/pull/8645 Apr 2025
     # (That PR lets each consumer pick its own channel and gain_factor from one mic.)
-  # TEST (stream selection): the separated streams as alternative STT sources (stream
+  # The separated streams as alternative STT sources (stream
   # 0, 1; the microphone above is stream 2). on_wake selects the stream that fired,
   # start_va the output; continued conversation keeps the last one.
   stream_microphones:
@@ -1083,22 +1113,22 @@ voice_assistant:
               priority: false
               sound_file: "boot_sound"
     - lambda: id(init_in_progress) = false;
-    # TEST: only the wake word instances whose switch is on
+    # only the wake word instances enabled in the test parameters
     - if:
         condition:
-          switch.is_on: mww_raw0_switch
+          lambda: return ${wake_word_raw0};
         then:
           - micro_wake_word.start:
               id: mww
     - if:
         condition:
-          switch.is_on: mww_raw1_switch
+          lambda: return ${wake_word_raw1};
         then:
           - micro_wake_word.start:
               id: mww_b
     - if:
         condition:
-          switch.is_on: mww_output_switch
+          lambda: return ${wake_word_output};
         then:
           - micro_wake_word.start:
               id: mww_c
@@ -1132,10 +1162,11 @@ voice_assistant:
   # When the voice assistant starts: Play a wake up sound, duck audio.
   on_start:
     # A run (wake word, start_va, or a conversation continued after an
-    # announcement): its TTS reply gets no output offset.
+    # announcement): its TTS reply gets no boost.
     - lambda: |-
         id(va_run_active) = true;
-        id(adaptive).set_announcement_offset(0);
+        id(announcement_boost_active) = false;
+    - script.execute: update_boost
     - mixer_speaker.apply_ducking:
         id: media_mixing_input
         decibel_reduction: 10 # dB quieter; 0 = full volume
@@ -1163,16 +1194,18 @@ voice_assistant:
               id(voice_assistant_phase) = ${voice_assist_reply_pending_phase_id};
           - script.execute: control_leds
   on_tts_start:
-    # TTS without a run = HA announcement (assist_satellite.announce): output
-    # offset until on_end, plus the urgent offset if set_announcement_offset
+    # TTS without a run = HA announcement (assist_satellite.announce): the
+    # announcement boost until on_end, plus urgent_boost_db if urgent_announcement
     # was called in the last 10 s.
     - lambda: |-
         if (!id(va_run_active)) {
-          float boost = ${announcement_offset_db};
-          if (id(urgent_pending) && millis() - id(urgent_set_ms) < 10000) boost += ${urgent_offset_db};
+          float boost = id(announcement_boost).state;
+          if (id(urgent_pending) && millis() - id(urgent_set_ms) < 10000) boost += ${urgent_boost_db};
           id(urgent_pending) = false;
-          id(adaptive).set_announcement_offset(boost);
+          id(announcement_boost_now) = boost;
+          id(announcement_boost_active) = true;
         }
+    - script.execute: update_boost
     - if:
         condition:
           # The intent_progress trigger didn't start the TTS response
@@ -1240,7 +1273,8 @@ voice_assistant:
               id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
               id(reply_pending) = false;
               id(va_run_active) = false;
-              id(adaptive).set_announcement_offset(0);  // announcement finished
+              id(announcement_boost_active) = false;  // announcement finished
+          - script.execute: update_boost
           - script.execute: control_leds
   on_timer_finished:
     - switch.turn_on: timer_ringing
@@ -1287,7 +1321,7 @@ voice_assistant:
         // LED updates are handled centrally by control_leds()
 
 globals:
-  # TEST (dual wake word): time of the last acted-on detection; repeat flag
+  # Dual wake word: time of the last acted-on detection; repeat flag
   - id: last_wake_ms
     type: uint32_t
     restore_value: no
@@ -1300,12 +1334,7 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
-  # TEST: comparison line already pending / this call is a repeat
-  # TEST: current AFE mode (for the echo filter length control)
-  - id: afe_mode_str
-    type: std::string
-    restore_value: no
-    initial_value: '"sr_low_cost"'
+  # comparison line already pending / this call is a repeat
   - id: compare_busy
     type: bool
     restore_value: no
@@ -1390,7 +1419,7 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: urgent_pending # set by the set_announcement_offset action
+  - id: urgent_pending # set by the urgent_announcement action
     type: bool
     restore_value: no
     initial_value: 'false'
@@ -1398,15 +1427,38 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: announcement_boost_active # an HA announcement is playing (from on_tts_start to on_end)
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: announcement_boost_now # its boost, dB (announcement boost + urgent)
+    type: float
+    restore_value: no
+    initial_value: '0'
 
 script:
-  # TEST (dual wake word): wake word detected on stream 0 (raw 0), 1 (raw 1) or
-  # 2 (output, test only). The first detection acts (the actions are the former
+  # Output boost for what is playing: an HA announcement gets its boost; replies,
+  # chimes and timers none; music the music boost; nothing playing, none.
+  - id: update_boost
+    then:
+      - lambda: |-
+          float boost = 0.0f;
+          const auto st = id(external_media_player).state;
+          if (id(announcement_boost_active)) {
+            boost = id(announcement_boost_now);
+          } else if (id(va_run_active) || st == media_player::MEDIA_PLAYER_STATE_ANNOUNCING) {
+            boost = 0.0f;
+          } else if (st == media_player::MEDIA_PLAYER_STATE_PLAYING) {  // media pipeline: http media or Sendspin
+            boost = id(music_boost).state;
+          }
+          id(audio_stack).set_output_boost_db(boost);
+  # Wake word detected on stream 0 (raw 0), 1 (raw 1) or 2 (output, comparison
+  # only). The first detection acts (the actions are the former
   # on_wake_word_detected); one on another stream within 1.5 s is the same
   # utterance and is only logged.
-  # TEST: one line per wake word event (detection or VAD veto on any stream), 1 s
-  # after the first, with each stream's peak sliding-average probability over the
-  # last ~2 s for that wake word, and whether it fired or was vetoed by VAD.
+  # One line per wake word event (detection or VAD veto on any stream), 1 s after
+  # the first, with each stream's peak sliding-average probability over the last
+  # ~2 s for that wake word, and whether it fired or was vetoed by VAD. Debug level.
   - id: compare_streams
     mode: parallel
     max_runs: 8
@@ -1441,7 +1493,7 @@ script:
                     line += buf;
                   }
                 }
-                ESP_LOGI("dual_mww", "Compare '%s' (%s): %s", wake_word.c_str(), trigger.c_str(), line.c_str());
+                ESP_LOGD("dual_mww", "Compare '%s' (%s): %s", wake_word.c_str(), trigger.c_str(), line.c_str());
   - id: on_wake
     mode: parallel
     max_runs: 4
@@ -1455,10 +1507,11 @@ script:
           const uint32_t now = millis();
           id(wake_repeat) = now - id(last_wake_ms) < 1500;
           if (id(wake_repeat)) {
-            ESP_LOGI("dual_mww", "Wake word '%s' also on %s, %u ms later (ignored)", wake_word.c_str(), name,
+            ESP_LOGD("dual_mww", "Wake word '%s' also on %s, %u ms later (ignored)", wake_word.c_str(), name,
                      (unsigned) (now - id(last_wake_ms)));
           } else {
             ESP_LOGI("dual_mww", "Wake word '%s' on %s", wake_word.c_str(), name);
+            id(doa).log_event(std::string("wake word on ") + name);  // TEST (DOA probe)
             id(last_wake_ms) = now;
             id(wake_first_stream) = stream;
           }
@@ -1518,7 +1571,7 @@ script:
                                               priority: true
                                               sound_file: "wake_word_triggered_sound"
                                           - delay: 300ms
-                                    # TEST (stream selection): STT gets the stream that fired
+                                    # STT gets the stream that fired
                                     - lambda: id(va).select_stream(stream);
                                     - voice_assistant.start:
                                         wake_word: !lambda return wake_word;
@@ -1904,26 +1957,6 @@ script:
             text: !lambda return stt_text;
 
 select:
-  # TEST: AFE mode at runtime, to compare CPU and quality. Changing it rebuilds the
-  # AFE (with the echo filter length below); a failed rebuild rolls back.
-  - platform: template
-    id: afe_mode_select
-    name: "AFE mode (test)"
-    entity_category: config
-    optimistic: true
-    options:
-      - sr_low_cost
-      - sr_high_perf
-    initial_option: sr_low_cost # matches esp_afe mode: low_cost
-    restore_value: false
-    set_action:
-      - lambda: |-
-          id(afe_mode_str) = x.str();
-          id(afe_processor).set_aec_filter_length((int) id(aec_filter_len).state);
-      - esp_afe.set_mode:
-          id: afe_processor
-          mode: !lambda return x.str();
-
   - platform: template
     name: "Wake word sensitivity"
     optimistic: true
@@ -1978,73 +2011,6 @@ select:
             id(saved_alarm_action) = x;
 
 switch:
-  # TEST: Espressif's AFE VAD (only feeds the Voice Detected sensor), off to save CPU
-  - platform: esp_afe
-    esp_afe_id: afe_processor
-    vad:
-      id: afe_vad_switch
-      name: "AFE VAD (test)"
-      restore_mode: ALWAYS_ON
-      entity_category: config
-
-  # TEST: each wake word instance on/off (remembered across reboots; the output
-  # instance starts off). Automatic starts (Home Assistant connected, OTA error) only
-  # start the instances whose switch is on.
-  - platform: template
-    id: mww_raw0_switch
-    name: "Wake word on raw 0 (test)"
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      # not before Home Assistant is connected (also skips the restore at boot;
-      # on_client_connected starts it then)
-      - if:
-          condition:
-            api.connected:
-          then:
-            - micro_wake_word.start:
-                id: mww
-    turn_off_action:
-      - micro_wake_word.stop:
-          id: mww
-  - platform: template
-    id: mww_raw1_switch
-    name: "Wake word on raw 1 (test)"
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      # not before Home Assistant is connected (also skips the restore at boot;
-      # on_client_connected starts it then)
-      - if:
-          condition:
-            api.connected:
-          then:
-            - micro_wake_word.start:
-                id: mww_b
-    turn_off_action:
-      - micro_wake_word.stop:
-          id: mww_b
-  - platform: template
-    id: mww_output_switch
-    name: "Wake word on output (test)"
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    turn_on_action:
-      # not before Home Assistant is connected (also skips the restore at boot;
-      # on_client_connected starts it then)
-      - if:
-          condition:
-            api.connected:
-          then:
-            - micro_wake_word.start:
-                id: mww_c
-    turn_off_action:
-      - micro_wake_word.stop:
-          id: mww_c
-
   # Echo cancellation on/off for A/B testing (keep on for normal use). The
   # speaker level calibration needs it on; while off, calibration pauses.
   - platform: esp_afe
@@ -2192,24 +2158,6 @@ switch:
       - script.execute: control_leds
 
 number:
-  # TEST: echo filter length at runtime (applied by rebuilding the AFE in the
-  # current AFE mode). Shorter = less CPU, less echo tail cancelled.
-  - platform: template
-    id: aec_filter_len
-    name: "Echo filter length (test)"
-    entity_category: config
-    optimistic: true
-    min_value: 2
-    max_value: 4
-    step: 1
-    initial_value: 4
-    restore_value: false
-    set_action:
-      - lambda: id(afe_processor).set_aec_filter_length((int) x);
-      - esp_afe.set_mode:
-          id: afe_processor
-          mode: !lambda return id(afe_mode_str);
-
   # Digital level trim applied after the AFE (0 dB = unity, saved across reboots).
   # The ES7210 analogue gain is fixed by the es7210_gain_db substitution.
   - platform: esp_audio_stack
@@ -2218,14 +2166,14 @@ number:
       name: "Mic Gain (post-AFE trim)"
       entity_category: config
       disabled_by_default: true # tuning only
-      # 0..+18 dB: digital attenuation can't undo clipping in the analogue chain
+      # 0..+15 dB: digital attenuation can't undo clipping in the analogue chain
       # (lower es7210_gain_db instead). Digital gain raises speech and room noise
       # alike (same signal-to-noise ratio); its limit is clipping on loud close speech.
       # Default +15 dB: with es7210_gain_db 24, speech at arm's length to 2 m is about
       # -27 dBFS RMS; loud speech right into the device peaks just under full scale.
       # Only the first boot uses it; after that the value set in HA is restored.
       min_value: 0
-      max_value: 18
+      max_value: 15
       initial_value: 15
 
   - platform: template
@@ -2295,6 +2243,39 @@ number:
 #          format: "[VA] Set noise suppression to %.0f"
 #          args: ["x"]
 
+  # Output boosts over the media player volume (see the boost substitutions)
+  - platform: template
+    id: announcement_boost
+    name: "Announcement boost"
+    icon: mdi:bullhorn
+    entity_category: config
+    unit_of_measurement: dB
+    optimistic: true
+    restore_value: true
+    min_value: -6
+    max_value: 6
+    step: 3
+    initial_value: ${announcement_boost_db}
+    mode: slider
+    on_value:
+      - script.execute: update_boost
+
+  - platform: template
+    id: music_boost
+    name: "Music boost"
+    icon: mdi:music
+    entity_category: config
+    unit_of_measurement: dB
+    optimistic: true
+    restore_value: true
+    min_value: -6
+    max_value: 6
+    step: 3
+    initial_value: ${music_boost_db}
+    mode: slider
+    on_value:
+      - script.execute: update_boost
+
   - platform: template
     id: led_ring_brightness
     name: "LED Ring Brightness"
@@ -2330,13 +2311,14 @@ number:
     mode: slider
 
 sensor:
-  # TEST (dual wake word): CPU load per core over the last 60 s (interval below)
+  # CPU load per core over the last 60 s (interval at the end)
   - platform: template
     id: cpu_load_core0
     name: CPU load core 0
     unit_of_measurement: "%"
     accuracy_decimals: 1
     entity_category: diagnostic
+    disabled_by_default: true
     update_interval: never
   - platform: template
     id: cpu_load_core1
@@ -2344,9 +2326,10 @@ sensor:
     unit_of_measurement: "%"
     accuracy_decimals: 1
     entity_category: diagnostic
+    disabled_by_default: true
     update_interval: never
 
-  # Memory and temperature diagnostics: off by default (enable in HA when needed)
+  # Memory, loop time and temperature diagnostics: off by default (enable in HA when needed)
   - platform: debug
     free:
       name: "Heap free"
@@ -2363,6 +2346,7 @@ sensor:
     loop_time:
       name: "Loop time"
       entity_category: diagnostic
+      disabled_by_default: true
   - platform: internal_temperature
     name: "ESP temperature"
     entity_category: diagnostic
@@ -2454,6 +2438,7 @@ text_sensor:
     reset_reason:
       name: "Reset reason"
       entity_category: diagnostic
+      disabled_by_default: true
   - platform: template
     id: next_timer_name
     name: "Next timer name"
@@ -2523,7 +2508,6 @@ binary_sensor:
     on_press:
       - media_player.volume_up: external_media_player
 
-# TEST (dual wake word)
 interval:
   # mww_b and mww_c follow mww: the wake words Home Assistant enabled, and the cutoffs
   # set by the Wake word sensitivity select (stop is switched on all directly)
@@ -2598,9 +2582,9 @@ interval:
           if (first || elapsed <= 0)
             return;
           const double load0 = 100.0 - idle[0], load1 = 100.0 - idle[1];
-          ESP_LOGI("cpu_stats", "CPU load last 60 s: core 0 %.1f %%, core 1 %.1f %%", load0, load1);
+          ESP_LOGD("cpu_stats", "CPU load last 60 s: core 0 %.1f %%, core 1 %.1f %%", load0, load1);
           std::sort(rows.begin(), rows.end(), [](const Row &x, const Row &y) { return x.pct > y.pct; });
           for (const auto &r : rows)
-            ESP_LOGI("cpu_stats", "  %-16s core %2d  %5.1f %%", r.name, r.core, r.pct);
+            ESP_LOGD("cpu_stats", "  %-16s core %2d  %5.1f %%", r.name, r.core, r.pct);
           id(cpu_load_core0).publish_state(load0);
           id(cpu_load_core1).publish_state(load1);
