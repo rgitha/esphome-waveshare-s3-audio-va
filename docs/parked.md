@@ -32,7 +32,7 @@ Why upgrade (from the 2026.10.2 → 2026.11.0 diff):
 
 Steps:
 
-1. Audio stack fork (repo rgitha/esphome-audio-stack, branch rgitha-v2026.11.0): move
+1. Audio stack fork (repo rgitha/esphome-audio-stack, branch rgitha-prod): move
    to the new APIs:
    - `data_callbacks_.call(vector)` → `publish_audio_()` in the esp_audio_stack
      microphone and the esp_afe raw-stream microphone;
@@ -75,8 +75,8 @@ expected to work, but a failing build after an add-on update starts here.
 
 ## Repository housekeeping
 
-- Delete the merged branches on GitHub (the session's proxy refused branch deletes):
-  repo rgitha/esphome-adaptive-volume branch `boost-out`, repo
-  rgitha/esphome-audio-stack branch `boost`.
-- Release v0.4.4 of repo rgitha/esphome-adaptive-volume (branch `main`, commit 8db7c71),
-  if not done yet.
+- Delete the merged branches on GitHub (the session's proxy refuses branch deletes):
+  - repo rgitha/esphome-audio-stack: `boost` and `dual-mww` (both merged into
+    `rgitha-prod`);
+  - repo rgitha/esphome-adaptive-volume: `noise-median` and `coherent-s` (both merged
+    into `main`).

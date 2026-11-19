@@ -628,7 +628,7 @@ external_components:
   # 1.1.2 from the component registry (instead of the n-IA-hane/esp-gmf fork), the
   # output boost (set_output_boost_db), and the AFE result tap with the esp_afe
   # microphone platform (raw_data channels as microphones, for wake word on the BSS
-  # streams). Branch rgitha-v2026.11.0, pinned by commit.
+  # streams). Branch rgitha-prod, pinned by commit.
   - source: github://rgitha/esphome-audio-stack@b92e0a5a29ee4d7f0d0b7d8b49514db6856e34e8
     components: [esp_audio_stack, esp_afe]
   # v0.4.4 (branch main), pinned by commit

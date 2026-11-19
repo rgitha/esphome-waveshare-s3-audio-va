@@ -15,7 +15,7 @@ probe is test-only.
 |---|---|---|---|
 | ESPHome 2026.10.2 | esphome/esphome (upstream) | Media player (speaker_source), mixer, resamplers, micro_wake_word, voice_assistant | Copies of voice_assistant and micro_wake_word (see below) |
 | Audio stack v2026.11.0 | n-IA-hane/esphome-audio-stack | esp_audio_stack, esp_afe, esp_aec, esp_audio_capture: codec, TDM I2S, AFE/AEC, mic gain, master volume | Third party, used through our fork |
-| Our stack fork | repo rgitha/esphome-audio-stack, branch `rgitha-v2026.11.0`, commit b92e0a5 | v2026.11.0 + 4 commits | GMF AI Audio 1.1.2 from Espressif's registry (`esp_afe/__init__.py`); output boost (`set_output_boost_db()`); AFE result tap and esp_afe microphone platform |
+| Our stack fork | repo rgitha/esphome-audio-stack, branch `rgitha-prod`, commit b92e0a5 | v2026.11.0 + 4 commits | GMF AI Audio 1.1.2 from Espressif's registry (`esp_afe/__init__.py`); output boost (`set_output_boost_db()`); AFE result tap and esp_afe microphone platform |
 | adaptive_volume | repo rgitha/esphome-adaptive-volume, branch `main`, commit 8db7c71 (v0.4.4) | Adaptive volume reduction | Our own component |
 
 n-IA-hane's stack is not a fork of ESPHome. It is a standalone external-components
@@ -49,9 +49,9 @@ All are in production except the BSS probe branch.
 
 | Fork or copy | Where | Branch / commit | Changes | Reason | Used in |
 |---|---|---|---|---|---|
-| Audio stack fork | rgitha/esphome-audio-stack | `rgitha-v2026.11.0` / 487db8f | Takes GMF AI Audio 1.1.2 from Espressif's component registry instead of the n-IA-hane/esp-gmf fork (GMF 1.1.2 needs ESP-SR 2.6.*; AFE manager API unchanged) | A copy we control in case upstream moves, rewrites or quarantines tags; Espressif's published GMF rather than a personal fork | Production |
-| Audio stack fork | rgitha/esphome-audio-stack | `rgitha-v2026.11.0` / d3e38c1 | Output boost: `set_output_boost_db()`, added to output volume + master, total capped at 0 dB; headroom above 0 dB in the software stage goes to the codec master | Louder announcements and music than replies, independent of adaptive volume | Production (fw 2026.11.19.1) |
-| Audio stack fork | rgitha/esphome-audio-stack | `rgitha-v2026.11.0` / b92e0a5 (merge of `dual-mww`, cba4fbc) | esp_afe result tap with up to 4 listeners; esp_afe microphone platform for raw 0 and raw 1 (applies mic gain) | Wake word on the separated streams | Production (fw 2026.11.19.2) |
+| Audio stack fork | rgitha/esphome-audio-stack | `rgitha-prod` / 487db8f | Takes GMF AI Audio 1.1.2 from Espressif's component registry instead of the n-IA-hane/esp-gmf fork (GMF 1.1.2 needs ESP-SR 2.6.*; AFE manager API unchanged) | A copy we control in case upstream moves, rewrites or quarantines tags; Espressif's published GMF rather than a personal fork | Production |
+| Audio stack fork | rgitha/esphome-audio-stack | `rgitha-prod` / d3e38c1 | Output boost: `set_output_boost_db()`, added to output volume + master, total capped at 0 dB; headroom above 0 dB in the software stage goes to the codec master | Louder announcements and music than replies, independent of adaptive volume | Production (fw 2026.11.19.1) |
+| Audio stack fork | rgitha/esphome-audio-stack | `rgitha-prod` / b92e0a5 (merge of `dual-mww`, cba4fbc) | esp_afe result tap with up to 4 listeners; esp_afe microphone platform for raw 0 and raw 1 (applies mic gain) | Wake word on the separated streams | Production (fw 2026.11.19.2) |
 | Audio stack fork | rgitha/esphome-audio-stack | `bss-probe` / 00598fe | esp_afe diagnostic result tap (raw_data, trigger_channel_id) | See the BSS streams; upstream has no access | BSS probe build |
 | micro_wake_word copy | this repo, `components/` | `main` (merged from `dual-mww`) | Several instances (MULTI_CONF); `task_core` pinning; ring buffer option (default 120 ms, set 500 ms); one inference lock across instances (esp-nn crash); per-model peak and veto diagnostics; `on_vad_blocked` trigger | Upstream allows one instance | Production (fw 2026.11.19.2) |
 | voice_assistant copy | this repo, `components/` | `main` (merged from `dual-mww`) | STT stream selection (stream whose wake word fired, with its pre-roll; fallback to the output) | Send the cleaner stream to STT | Production (fw 2026.11.19.2) |
@@ -130,7 +130,7 @@ sum: volume −3, adaptive −6, boost +6 gives −3 dB.
 
 How it is implemented:
 
-- Stack fork (repo rgitha/esphome-audio-stack, branch `rgitha-v2026.11.0`, commit
+- Stack fork (repo rgitha/esphome-audio-stack, branch `rgitha-prod`, commit
   d3e38c1): `set_output_boost_db()`. The software output gain (media player volume)
   takes the boost first; what would go above 0 dB there is given to the codec master
   (adaptive reduction), so the total is the sum above, capped at 0 dB. The codec
