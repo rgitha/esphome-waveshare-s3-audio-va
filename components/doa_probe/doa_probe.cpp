@@ -243,23 +243,24 @@ void DoaProbe::loop() {
   if (now - this->last_live_ms_ >= 100) {
     this->last_live_ms_ = now;
     const uint32_t count = this->result_count_.load(std::memory_order_acquire);
-    const bool speech_now =
-        !this->require_vad_ || now - this->last_speech_ms_.load(std::memory_order_relaxed) < 200;
+    const bool speech_now = !this->require_vad_ ||
+                            now - this->last_speech_ms_.load(std::memory_order_relaxed) <= this->led_hold_ms_;
     float a[RESULTS];
     int m = 0;
     for (uint32_t i = 0; i < (uint32_t) RESULTS && i < count; i++) {
       const Result &r = this->results_[(count - 1 - i) % RESULTS];
-      if (now - r.ms > 500)
+      if (now - r.ms > 1000)  // LED window: 1 s
         break;
       if (r.level_db >= this->level_threshold_db_ && r.angle >= 0 && (r.speech || !this->require_vad_))
         a[m++] = r.angle;
     }
     if (!speech_now) {
-      this->live_angle_ = NAN;  // voice ended: blank at once
-    } else if (m > 0) {
+      this->live_angle_ = NAN;  // led_hold after voice ended: blank
+    } else if (m >= (500 * SAMPLE_RATE / 1000 + this->frame_samples_ - 1) / this->frame_samples_) {
+      // at least 0.5 s worth of qualifying frames in the 1 s window (8 at 1024 samples)
       std::sort(a, a + m);
       this->live_angle_ = a[m / 2];
-    }  // else: speech but no qualifying frame yet: hold the last angle
+    }  // else: under 0.5 s worth of frames: hold the last angle (or none yet)
   }
   if (now - this->last_log_ms_ < this->log_interval_ms_)
     return;

@@ -26,6 +26,7 @@ CONF_START_DELAY = "start_delay"
 CONF_CHANGE_THRESHOLD = "change_threshold"
 CONF_REQUIRE_VAD = "require_vad"
 CONF_VAD_SOURCES = "vad_sources"
+CONF_LED_HOLD = "led_hold"
 CONF_DELAY_OFFSET = "delay_offset"
 CONF_MIN_FREE_INTERNAL = "min_free_internal"
 
@@ -56,6 +57,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_REQUIRE_VAD, default=True): cv.boolean,
         # micro_wake_word instances whose VAD model decides "voice" (any of them)
         cv.Optional(CONF_VAD_SOURCES, default=[]): cv.ensure_list(cv.use_id(micro_wake_word.MicroWakeWord)),
+        # the LEDs keep the last direction this long after voice ends
+        cv.Optional(CONF_LED_HOLD, default="1500ms"): cv.positive_time_period_milliseconds,
         # 0 deg = right mic's side (transport mic 0, slot 0); swap if the angle runs backwards
         cv.Optional(CONF_SWAP_MICS, default=False): cv.boolean,
         cv.Optional(CONF_TASK_CORE, default=0): cv.int_range(min=0, max=1),
@@ -87,6 +90,7 @@ async def to_code(config):
     cg.add(var.set_level_threshold(config[CONF_LEVEL_THRESHOLD]))
     cg.add(var.set_change_threshold(config[CONF_CHANGE_THRESHOLD]))
     cg.add(var.set_require_vad(config[CONF_REQUIRE_VAD]))
+    cg.add(var.set_led_hold(config[CONF_LED_HOLD]))
     for src in config[CONF_VAD_SOURCES]:
         cg.add(var.add_vad_source(await cg.get_variable(src)))
     cg.add(var.set_swap_mics(config[CONF_SWAP_MICS]))

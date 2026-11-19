@@ -33,6 +33,7 @@ class DoaProbe : public Component {
   void set_change_threshold(float deg) { this->change_threshold_ = deg; }
   void set_require_vad(bool on) { this->require_vad_ = on; }
   void add_vad_source(micro_wake_word::MicroWakeWord *mww) { this->vad_sources_.push_back(mww); }
+  void set_led_hold(uint32_t ms) { this->led_hold_ms_ = ms; }
   void set_swap_mics(bool swap) { this->swap_mics_ = swap; }
   void set_task_core(int core) { this->task_core_ = core; }
   void set_start_delay(uint32_t ms) { this->start_delay_ms_ = ms; }
@@ -47,8 +48,8 @@ class DoaProbe : public Component {
   /// Log the angle over the last 2 s, labelled (e.g. at a wake word).
   void log_event(const std::string &label);
   /// Angle for the LED display (deg), NAN when no voice: the median of the voice frames
-  /// in the last 0.5 s; while the VAD still reports speech but no frame qualifies, the
-  /// last angle is held; blank as soon as the VAD reports silence. Updated every 100 ms.
+  /// in the last 1 s, once at least 0.5 s worth of them is there; until then, the
+  /// last angle is held; blank led_hold after the VAD reports silence. Updated every 100 ms.
   float get_live_angle() const { return this->live_angle_; }
 
  protected:
@@ -68,6 +69,7 @@ class DoaProbe : public Component {
   float level_threshold_db_{-60.0f};
   float change_threshold_{10.0f};
   bool require_vad_{true};
+  uint32_t led_hold_ms_{1500};
   std::atomic<uint32_t> last_speech_ms_{0};  // last time a micro_wake_word VAD reported voice (polled in loop())
   std::vector<micro_wake_word::MicroWakeWord *> vad_sources_;
   float last_reported_{NAN};
