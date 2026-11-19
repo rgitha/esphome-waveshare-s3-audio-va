@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.19.1"
+  fw_version: "2026.11.19.2"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -59,7 +59,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 8cd3ca6a83756ba532924f2cf2c11a0de8dfcfc5
+  repo_ref: b2a8442ca769f15a928fb7777f53725a9dc4bf35
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -98,6 +98,16 @@ substitutions:
   voice_assist_reply_pending_phase_id: '6' # reply handed to TTS, audio not playing yet
   voice_assist_not_ready_phase_id: '10' # not ready
   voice_assist_error_phase_id: '11' # encountered an error
+
+  # ---- Test parameters: DO NOT TOUCH ------------------------------------------
+  # Fixed values of the former HA test controls of the dual wake word build
+  # (docs/dual-wake-word.md). Change only for a deliberate test.
+  afe_mode: low_cost            # AFE mode: low_cost / high_perf (only echo cancellation differs; high_perf ~15-20 points more CPU during playback, ~10 KB more internal RAM)
+  afe_echo_filter_length: "4"   # echo filter length 2..4: no measurable CPU effect
+  afe_vad: "true"               # Espressif AFE VAD (feeds the Voice Detected sensor only; no CPU saving when off)
+  wake_word_raw0: "true"        # wake word instance on BSS stream raw 0
+  wake_word_raw1: "true"        # wake word instance on BSS stream raw 1
+  wake_word_output: "false"     # third instance on the unseparated output, for comparison only (with both above: model time exceeds the shared inference lock, overflows)
 
 # Pre-configured camera code
 # exposes UI controls to Homeassistant
@@ -152,6 +162,10 @@ esp32:
     advanced:
       compiler_optimization: PERF # AFE + wake word are CPU heavy
     sdkconfig_options:
+      # FreeRTOS run-time statistics for the CPU load log and sensors (interval at the end)
+      CONFIG_FREERTOS_USE_TRACE_FACILITY: "y"
+      CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS: "y"
+      CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64: "y"
       # Bounded Wi-Fi buffering (intercom board profile): media/TTS ingress sees
       # backpressure before the audio sink saturates.
       CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM: "10"
@@ -216,6 +230,8 @@ api:
             id(led_ring_color_b) = std::min(1.0f, std::max(0.0f, blue));
     - action: start_va
       then:
+        # no wake word chose a stream -> STT gets the output (stream 2)
+        - lambda: id(va).select_stream(2);
         - voice_assistant.start
     - action: stop_va
       then:
@@ -260,6 +276,11 @@ ota:
     on_begin:
       then:
         - micro_wake_word.stop:
+            id: mww
+        - micro_wake_word.stop:
+            id: mww_b
+        - micro_wake_word.stop:
+            id: mww_c
         - voice_assistant.stop:
         - media_player.stop:
             id: external_media_player
@@ -311,7 +332,25 @@ ota:
             g: 0.0
             b: 0.0
         - delay: 3s
-        - micro_wake_word.start:
+        # only the wake word instances enabled in the test parameters
+        - if:
+            condition:
+              lambda: return ${wake_word_raw0};
+            then:
+              - micro_wake_word.start:
+                  id: mww
+        - if:
+            condition:
+              lambda: return ${wake_word_raw1};
+            then:
+              - micro_wake_word.start:
+                  id: mww_b
+        - if:
+            condition:
+              lambda: return ${wake_word_output};
+            then:
+              - micro_wake_word.start:
+                  id: mww_c
         - script.execute: control_leds
 
 i2c:
@@ -586,17 +625,21 @@ light:
 
 external_components:
   # Fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus Espressif's GMF AI Audio
-  # 1.1.2 from the component registry (instead of the n-IA-hane/esp-gmf fork) and the
-  # output boost (set_output_boost_db). Branch rgitha-v2026.11.0, pinned by commit.
-  - source: github://rgitha/esphome-audio-stack@d3e38c165e823acd97c6c32939f90dbc5db23f9c
+  # 1.1.2 from the component registry (instead of the n-IA-hane/esp-gmf fork), the
+  # output boost (set_output_boost_db), and the AFE result tap with the esp_afe
+  # microphone platform (raw_data channels as microphones, for wake word on the BSS
+  # streams). Branch rgitha-v2026.11.0, pinned by commit.
+  - source: github://rgitha/esphome-audio-stack@b92e0a5a29ee4d7f0d0b7d8b49514db6856e34e8
     components: [esp_audio_stack, esp_afe]
   # v0.4.4 (branch main), pinned by commit
   - source: github://rgitha/esphome-adaptive-volume@8db7c7113402045ee140d9fba0e2fb5536d3434f
     components: [adaptive_volume]
   # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
   # repository's components/ at repo_ref
+  # and micro_wake_word from ESPHome 2026.10.2, patched for several instances (wake
+  # word on each BSS stream), task_core pinning, ring_buffer_duration and diagnostics
   - source: github://rgitha/esphome-waveshare-s3-audio-va@${repo_ref}
-    components: [voice_assistant]
+    components: [voice_assistant, micro_wake_word]
 
 # Audio hardware: one shared I2S bus in 4-slot TDM at 48 kHz.
 # ES7210 slots: 0 = right mic, 2 = left mic, 1 = ES8311 playback reference, 3 = unused
@@ -651,13 +694,13 @@ esp_afe:
   type: sr            # speech recognition: linear AEC, keeps the spectrum intact for
                       # wake word / STT. "fd" (intercom default) adds nonlinear
                       # processing for two-way calls and lowered STT accuracy here.
-  mode: high_perf
+  mode: ${afe_mode}   # see the test parameters
   mic_num: ${afe_mic_num}  # see the afe_mic_num substitution
   se_enabled: ${afe_dual}  # dual-mic speech enhancement (BSS); BSS cannot be toggled at runtime
-  aec_filter_length: 4
+  aec_filter_length: ${afe_echo_filter_length}
   aec_nlp_level: normal # only used by vc/fd types
   ns_enabled: false   # no effect with 2 mics (BSS takes precedence); off so 1-mic tests compare like for like
-  vad_enabled: true
+  vad_enabled: ${afe_vad}
   continuous_vad: true
   agc_enabled: false
   memory_alloc_mode: more_psram
@@ -719,11 +762,10 @@ adaptive_volume:
   # Path gain speaker -> mic: the median in use, and each reply's (diagnostics)
   path_gain:
     name: Speaker path gain
+    disabled_by_default: true
   path_gain_reply:
     name: Speaker path gain (last reply)
-  # Old reply level method, for comparison (diagnostic)
-  speaker_level_reply:
-    name: Speaker level (last reply)
+    disabled_by_default: true
   attenuation:
     name: Adaptive reduction level
   current_volume:
@@ -735,6 +777,17 @@ adaptive_volume:
 microphone:
   - platform: esp_audio_stack
     id: afe_mic
+  # The two separated (BSS) streams as microphones, one wake
+  # word instance each. raw_data channel 2 is the unseparated stream afe_mic delivers.
+  # Mic Gain trim applied as on afe_mic; starting either keeps afe_mic (the pipeline) running.
+  - platform: esp_afe
+    id: afe_raw0
+    raw_channel: 0
+    pipeline_microphone: afe_mic
+  - platform: esp_afe
+    id: afe_raw1
+    raw_channel: 1
+    pipeline_microphone: afe_mic
 
 speaker:
   - platform: esp_audio_stack
@@ -870,78 +923,127 @@ media_player:
             - script.execute: control_leds_volume_changed
 
 micro_wake_word:
-  id: mww
-  # Larger audio buffer to absorb brief inference delays (default 120 ms).
-  # Uncomment once your ESPHome release supports it (esphome/esphome PR #20942,
-  # merged to dev 2026-10-18; not in 2026.9 / 2026.10).
-  # ring_buffer_duration: 800ms
-  microphone:
-    id: mww_mic
-    microphone: afe_mic # AFE output is mono, so no channel selection
-    gain_factor: 1 # digital gain; use the Mic Gain trim instead
-  task_stack_in_psram: true
-  stop_after_detection: false
-  models:
-    - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
-      id: okay_nabu
-    #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
-    #  id: kenobi
-    - model: ${mww_models_url}/hey_jarvis.json
-      id: hey_jarvis
-    #- model: hey_mycroft
-    #  id: hey_mycroft
-    - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
-      id: stop
-      internal: true
-      probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
-  vad:
-    model: ${mww_models_url}/vad.json
-    probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
-  on_wake_word_detected:
-    # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing
-    - if:
-        condition:
-          switch.is_off: mic_mute_switch
-        then:
-          # If a timer is ringing: Stop it, do not start the voice assistant (We can stop timer from voice!)
-          - if:
-              condition:
-                switch.is_on: timer_ringing
-              then:
-                - switch.turn_off: timer_ringing
-              # Stop voice assistant if running
-              else:
-                - if:
-                    condition:
-                      voice_assistant.is_running:
-                    then:
-                      voice_assistant.stop:
-                    # Stop any other media player announcement, or a reply still on its way
-                    # (the run can end before its audio starts)
-                    else:
-                      - if:
-                          condition:
-                            or:
-                              - media_player.is_announcing: external_media_player
-                              - lambda: return id(reply_pending);
-                          then:
-                            - lambda: id(reply_pending) = false;
-                            - media_player.stop:
-                                id: external_media_player
-                                announcement: true
-                          # Start the voice assistant and play the wake sound, if enabled
-                          else:
-                            - if:
-                                condition:
-                                  switch.is_on: wake_sound
-                                then:
-                                  - script.execute:
-                                      id: play_sound
-                                      priority: true
-                                      sound_file: "wake_word_triggered_sound"
-                                  - delay: 300ms
-                            - voice_assistant.start:
-                                wake_word: !lambda return wake_word;
+  # One instance per separated (BSS) stream, each with all models, plus one on the
+  # unseparated output for comparison (started only if wake_word_output is true). mww
+  # follows Home Assistant's wake word choice; mww_b and mww_c copy mww's enabled
+  # wake words and cutoffs (interval below). Detections go to the on_wake script,
+  # which acts on the first; every detection or VAD veto also produces one
+  # comparison line with each stream's peak probability (compare_streams).
+  - id: mww
+    task_core: 0 # pinned (raw 0 and output on core 0, raw 1 on core 1)
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
+    microphone:
+      id: mww_mic
+      microphone: afe_raw0 # separated stream raw 0
+      gain_factor: 1 # digital gain; use the Mic Gain trim instead
+    task_stack_in_psram: true
+    stop_after_detection: false
+    models:
+      - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+        id: okay_nabu
+      #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      #  id: kenobi
+      - model: ${mww_models_url}/hey_jarvis.json
+        id: hey_jarvis
+      #- model: hey_mycroft
+      #  id: hey_mycroft
+      - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
+        id: stop
+        internal: true
+        probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+    vad:
+      model: ${mww_models_url}/vad.json
+      probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
+    on_wake_word_detected:
+      - script.execute:
+          id: on_wake
+          wake_word: !lambda return wake_word;
+          stream: 0
+    on_vad_blocked:
+      - script.execute:
+          id: compare_streams
+          wake_word: !lambda return wake_word;
+          trigger: "VAD veto on raw 0"
+  - id: mww_b
+    task_core: 1 # pinned
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
+    microphone:
+      id: mww_b_mic
+      microphone: afe_raw1 # separated stream raw 1
+      gain_factor: 1 # digital gain; use the Mic Gain trim instead
+    task_stack_in_psram: true
+    stop_after_detection: false
+    models:
+      - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+        id: okay_nabu_b
+      #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      #  id: kenobi
+      - model: ${mww_models_url}/hey_jarvis.json
+        id: hey_jarvis_b
+      #- model: hey_mycroft
+      #  id: hey_mycroft
+      - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
+        id: stop_b
+        internal: true
+        probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+    vad:
+      model: ${mww_models_url}/vad.json
+      probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
+    on_wake_word_detected:
+      - script.execute:
+          id: on_wake
+          wake_word: !lambda return wake_word;
+          stream: 1
+    on_vad_blocked:
+      - script.execute:
+          id: compare_streams
+          wake_word: !lambda return wake_word;
+          trigger: "VAD veto on raw 1"
+
+  - id: mww_c # the unseparated output, for comparison only (wake_word_output)
+    task_core: 0 # pinned
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
+    microphone:
+      id: mww_c_mic
+      microphone: afe_mic # unseparated output
+      gain_factor: 1 # digital gain; use the Mic Gain trim instead
+    task_stack_in_psram: true
+    stop_after_detection: false
+    models:
+      - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+        id: okay_nabu_c
+      #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      #  id: kenobi
+      - model: ${mww_models_url}/hey_jarvis.json
+        id: hey_jarvis_c
+      #- model: hey_mycroft
+      #  id: hey_mycroft
+      - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
+        id: stop_c
+        internal: true
+        probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+    vad:
+      model: ${mww_models_url}/vad.json
+      probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
+    on_wake_word_detected:
+      - script.execute:
+          id: on_wake
+          wake_word: !lambda return wake_word;
+          stream: 2
+    on_vad_blocked:
+      - script.execute:
+          id: compare_streams
+          wake_word: !lambda return wake_word;
+          trigger: "VAD veto on output"
 
 voice_assistant:
   id: va
@@ -956,6 +1058,14 @@ voice_assistant:
     # Using diff channel from mww so that some gain settings can apply properly?
     # https://github.com/esphome/esphome/pull/8645 Apr 2025
     # (That PR lets each consumer pick its own channel and gain_factor from one mic.)
+  # The separated streams as alternative STT sources (stream
+  # 0, 1; the microphone above is stream 2). on_wake selects the stream that fired,
+  # start_va the output; continued conversation keeps the last one.
+  stream_microphones:
+    - microphone: afe_raw0
+      id: va_stream0
+    - microphone: afe_raw1
+      id: va_stream1
   media_player: external_media_player
   micro_wake_word: mww
   use_wake_word: false
@@ -984,7 +1094,25 @@ voice_assistant:
               priority: false
               sound_file: "boot_sound"
     - lambda: id(init_in_progress) = false;
-    - micro_wake_word.start:
+    # only the wake word instances enabled in the test parameters
+    - if:
+        condition:
+          lambda: return ${wake_word_raw0};
+        then:
+          - micro_wake_word.start:
+              id: mww
+    - if:
+        condition:
+          lambda: return ${wake_word_raw1};
+        then:
+          - micro_wake_word.start:
+              id: mww_b
+    - if:
+        condition:
+          lambda: return ${wake_word_output};
+        then:
+          - micro_wake_word.start:
+              id: mww_c
     - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
     - script.execute: control_leds
   on_client_disconnected:
@@ -1174,6 +1302,28 @@ voice_assistant:
         // LED updates are handled centrally by control_leds()
 
 globals:
+  # Dual wake word: time of the last acted-on detection; repeat flag
+  - id: last_wake_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: wake_repeat
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: wake_first_stream
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # comparison line already pending / this call is a repeat
+  - id: compare_busy
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: compare_skip
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   - id: led_scene  # requested LED scene (see the Scene effect)
     type: int
     restore_value: no
@@ -1283,6 +1433,128 @@ script:
             boost = id(music_boost).state;
           }
           id(audio_stack).set_output_boost_db(boost);
+  # Wake word detected on stream 0 (raw 0), 1 (raw 1) or 2 (output, comparison
+  # only). The first detection acts (the actions are the former
+  # on_wake_word_detected); one on another stream within 1.5 s is the same
+  # utterance and is only logged.
+  # One line per wake word event (detection or VAD veto on any stream), 1 s after
+  # the first, with each stream's peak sliding-average probability over the last
+  # ~2 s for that wake word, and whether it fired or was vetoed by VAD. Debug level.
+  - id: compare_streams
+    mode: parallel
+    max_runs: 8
+    parameters:
+      wake_word: string
+      trigger: string
+    then:
+      - lambda: |-
+          id(compare_skip) = id(compare_busy);
+          id(compare_busy) = true;
+      - if:
+          condition:
+            lambda: return !id(compare_skip);
+          then:
+            - delay: 1s
+            - lambda: |-
+                id(compare_busy) = false;
+                const uint32_t now = millis();
+                micro_wake_word::MicroWakeWord *inst[3] = {id(mww), id(mww_b), id(mww_c)};
+                static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
+                std::string line;
+                for (int k = 0; k < 3; k++) {
+                  for (auto *m : inst[k]->get_wake_words()) {
+                    if (m->get_wake_word() != wake_word)
+                      continue;
+                    const uint32_t d = m->get_last_detected_ms(), v = m->get_last_vetoed_ms();
+                    const bool fired = d != 0 && now - d < 2500;
+                    const bool vetoed = !fired && v != 0 && now - v < 2500;
+                    char buf[48];
+                    snprintf(buf, sizeof(buf), "%s%s %.2f%s", k ? " | " : "", NAMES[k], m->get_recent_peak() / 255.0f,
+                             fired ? " fired" : (vetoed ? " vad-veto" : ""));
+                    line += buf;
+                  }
+                }
+                ESP_LOGD("dual_mww", "Compare '%s' (%s): %s", wake_word.c_str(), trigger.c_str(), line.c_str());
+  - id: on_wake
+    mode: parallel
+    max_runs: 4
+    parameters:
+      wake_word: string
+      stream: int
+    then:
+      - lambda: |-
+          static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
+          const char *name = (stream >= 0 && stream <= 2) ? NAMES[stream] : "?";
+          const uint32_t now = millis();
+          id(wake_repeat) = now - id(last_wake_ms) < 1500;
+          if (id(wake_repeat)) {
+            ESP_LOGD("dual_mww", "Wake word '%s' also on %s, %u ms later (ignored)", wake_word.c_str(), name,
+                     (unsigned) (now - id(last_wake_ms)));
+          } else {
+            ESP_LOGI("dual_mww", "Wake word '%s' on %s", wake_word.c_str(), name);
+            id(last_wake_ms) = now;
+            id(wake_first_stream) = stream;
+          }
+      - if:
+          condition:
+            lambda: return !id(wake_repeat);
+          then:
+            - script.execute:
+                id: compare_streams
+                wake_word: !lambda return wake_word;
+                trigger: !lambda |-
+                  static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
+                  return std::string("acted on ") + NAMES[id(wake_first_stream)];
+      - if:
+          condition:
+            lambda: return !id(wake_repeat);
+          then:
+            # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing
+            - if:
+                condition:
+                  switch.is_off: mic_mute_switch
+                then:
+                  # If a timer is ringing: Stop it, do not start the voice assistant (We can stop timer from voice!)
+                  - if:
+                      condition:
+                        switch.is_on: timer_ringing
+                      then:
+                        - switch.turn_off: timer_ringing
+                      # Stop voice assistant if running
+                      else:
+                        - if:
+                            condition:
+                              voice_assistant.is_running:
+                            then:
+                              voice_assistant.stop:
+                            # Stop any other media player announcement, or a reply still on its way
+                            # (the run can end before its audio starts)
+                            else:
+                              - if:
+                                  condition:
+                                    or:
+                                      - media_player.is_announcing: external_media_player
+                                      - lambda: return id(reply_pending);
+                                  then:
+                                    - lambda: id(reply_pending) = false;
+                                    - media_player.stop:
+                                        id: external_media_player
+                                        announcement: true
+                                  # Start the voice assistant and play the wake sound, if enabled
+                                  else:
+                                    - if:
+                                        condition:
+                                          switch.is_on: wake_sound
+                                        then:
+                                          - script.execute:
+                                              id: play_sound
+                                              priority: true
+                                              sound_file: "wake_word_triggered_sound"
+                                          - delay: 300ms
+                                    # STT gets the stream that fired
+                                    - lambda: id(va).select_stream(stream);
+                                    - voice_assistant.start:
+                                        wake_word: !lambda return wake_word;
   - id: night_mode_enter
     mode: queued
     then:
@@ -1595,6 +1867,8 @@ script:
                   switch.is_off: timer_ringing
                 then:
                   - micro_wake_word.enable_model: stop
+                  - micro_wake_word.enable_model: stop_b
+                  - micro_wake_word.enable_model: stop_c
             - wait_until:
                 condition:
                   lambda: |-
@@ -1607,6 +1881,8 @@ script:
                   switch.is_off: timer_ringing
                 then:
                   - micro_wake_word.disable_model: stop
+                  - micro_wake_word.disable_model: stop_b
+                  - micro_wake_word.disable_model: stop_c
 
   # Alarm handling
   - id: check_alarm
@@ -1750,6 +2026,8 @@ switch:
     turn_on_action:
       - lambda: id(mic_is_muted) = true;
       - microphone.mute: afe_mic
+      - microphone.mute: afe_raw0
+      - microphone.mute: afe_raw1
       - script.execute:
           id: flash_ring
           muted: true
@@ -1766,6 +2044,8 @@ switch:
     turn_off_action:
       - lambda: id(mic_is_muted) = false;
       - microphone.unmute: afe_mic
+      - microphone.unmute: afe_raw0
+      - microphone.unmute: afe_raw1
       - script.execute:
           id: flash_ring
           muted: false
@@ -1818,6 +2098,8 @@ switch:
     restore_mode: ALWAYS_OFF
     on_turn_off:
       - micro_wake_word.disable_model: stop
+      - micro_wake_word.disable_model: stop_b
+      - micro_wake_word.disable_model: stop_c
       - script.execute: disable_repeat
       - if:
           condition:
@@ -1837,6 +2119,8 @@ switch:
           decibel_reduction: 10
           duration: 0.0s
       - micro_wake_word.enable_model: stop
+      - micro_wake_word.enable_model: stop_b
+      - micro_wake_word.enable_model: stop_c
       - script.execute: ring_timer
       - script.execute: control_leds
       - delay: 2min
@@ -2007,7 +2291,25 @@ number:
     mode: slider
 
 sensor:
-  # Memory and temperature diagnostics: off by default (enable in HA when needed)
+  # CPU load per core over the last 60 s (interval at the end)
+  - platform: template
+    id: cpu_load_core0
+    name: CPU load core 0
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
+  - platform: template
+    id: cpu_load_core1
+    name: CPU load core 1
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
+
+  # Memory, loop time and temperature diagnostics: off by default (enable in HA when needed)
   - platform: debug
     free:
       name: "Heap free"
@@ -2024,6 +2326,7 @@ sensor:
     loop_time:
       name: "Loop time"
       entity_category: diagnostic
+      disabled_by_default: true
   - platform: internal_temperature
     name: "ESP temperature"
     entity_category: diagnostic
@@ -2115,6 +2418,7 @@ text_sensor:
     reset_reason:
       name: "Reset reason"
       entity_category: diagnostic
+      disabled_by_default: true
   - platform: template
     id: next_timer_name
     name: "Next timer name"
@@ -2183,3 +2487,84 @@ binary_sensor:
       inverted: true
     on_press:
       - media_player.volume_up: external_media_player
+
+interval:
+  # mww_b and mww_c follow mww: the wake words Home Assistant enabled, and the cutoffs
+  # set by the Wake word sensitivity select (stop is switched on all directly)
+  - interval: 1s
+    then:
+      - lambda: |-
+          auto a = id(mww).get_wake_words();
+          for (auto *other : {id(mww_b), id(mww_c)}) {
+            auto b = other->get_wake_words();
+            for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+              if (a[i]->is_enabled() != b[i]->is_enabled()) {
+                if (a[i]->is_enabled()) {
+                  b[i]->enable();
+                } else {
+                  b[i]->disable();
+                }
+              }
+              if (b[i]->get_probability_cutoff() != a[i]->get_probability_cutoff())
+                b[i]->set_probability_cutoff(a[i]->get_probability_cutoff());
+            }
+          }
+
+  # CPU per task and per core over the last 60 s (FreeRTOS run-time statistics).
+  # Share of one core; core -1 = the task may run on either core.
+  - interval: 60s
+    then:
+      - lambda: |-
+          struct Prev {
+            TaskHandle_t handle;
+            uint64_t time;
+          };
+          static std::vector<Prev> prev;
+          static uint64_t prev_total = 0;
+          const UBaseType_t cap = uxTaskGetNumberOfTasks() + 8;
+          std::vector<TaskStatus_t> tasks(cap);
+          configRUN_TIME_COUNTER_TYPE total = 0;
+          const UBaseType_t n = uxTaskGetSystemState(tasks.data(), cap, &total);
+          const bool first = prev_total == 0;
+          const double elapsed = static_cast<double>(total - prev_total);
+          struct Row {
+            const char *name;
+            int core;
+            double pct;
+          };
+          std::vector<Row> rows;
+          double idle[2] = {0, 0};
+          std::vector<Prev> next;
+          next.reserve(n);
+          for (UBaseType_t i = 0; i < n; i++) {
+            const TaskStatus_t &t = tasks[i];
+            const uint64_t now = t.ulRunTimeCounter;
+            next.push_back({t.xHandle, now});
+            uint64_t before = 0;
+            for (const auto &p : prev)
+              if (p.handle == t.xHandle)
+                before = p.time;
+            if (now < before)
+              before = 0;  // a new task at the address of a deleted one (e.g. the AFE rebuilt)
+            if (first || elapsed <= 0)
+              continue;
+            const double pct = 100.0 * static_cast<double>(now - before) / elapsed;
+            const BaseType_t c = xTaskGetCoreID(t.xHandle);  // tskNO_AFFINITY when it may run on either
+            const int core = (c == 0 || c == 1) ? static_cast<int>(c) : -1;
+            if (strncmp(t.pcTaskName, "IDLE", 4) == 0 && core >= 0) {
+              idle[core] += pct;
+            } else if (pct >= 0.1) {
+              rows.push_back({t.pcTaskName, core, pct});
+            }
+          }
+          prev.swap(next);
+          prev_total = total;
+          if (first || elapsed <= 0)
+            return;
+          const double load0 = 100.0 - idle[0], load1 = 100.0 - idle[1];
+          ESP_LOGD("cpu_stats", "CPU load last 60 s: core 0 %.1f %%, core 1 %.1f %%", load0, load1);
+          std::sort(rows.begin(), rows.end(), [](const Row &x, const Row &y) { return x.pct > y.pct; });
+          for (const auto &r : rows)
+            ESP_LOGD("cpu_stats", "  %-16s core %2d  %5.1f %%", r.name, r.core, r.pct);
+          id(cpu_load_core0).publish_state(load0);
+          id(cpu_load_core1).publish_state(load1);

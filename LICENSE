@@ -3,11 +3,11 @@
 Copyright (c) 2026 rgitha
 
 This repository is published under the MIT license, except the C++ files of
-components/voice_assistant (voice_assistant.cpp, voice_assistant.h). Those are
-a copy of ESPHome's voice_assistant component (Copyright (c) 2019 ESPHome) with
-local changes, and stay under the GNU General Public License v3, as in ESPHome.
-components/voice_assistant/__init__.py is ESPHome Python code and, as in
-ESPHome, under the MIT license.
+components/voice_assistant and components/micro_wake_word (*.cpp, *.h). Those
+are copies of ESPHome's voice_assistant and micro_wake_word components
+(Copyright (c) 2019 ESPHome) with local changes, and stay under the GNU General
+Public License v3, as in ESPHome. Their __init__.py files are ESPHome Python code
+and, as in ESPHome, under the MIT license.
 
 Both MIT and GPLv3 licenses are attached to this document.
 

@@ -18,12 +18,14 @@ repository's `components/` at `repo_ref`, like the sounds and the stop model.
 ## Design notes
 
 **Audio path.** [esphome-audio-stack](https://github.com/rgitha/esphome-audio-stack)
-(backup fork of n-IA-hane/esphome-audio-stack) runs the ES7210 mics and the
-ES8311 codec as 48 kHz 4-slot TDM: slot 0 right mic, 2 left mic, 1 speaker
-reference. Espressif's AFE (type `sr`, `high_perf`, AGC off) does echo
-cancellation and dual-mic separation (BSS) and gives one clean 16 kHz mic to
-the wake word and the voice assistant. Type `sr` rather than `fd`: `fd`'s
-nonlinear processing lowered STT accuracy. `afe_mic_num: "1"` builds a
+(fork of n-IA-hane/esphome-audio-stack, see
+[docs/audio-stack-forks.md](docs/audio-stack-forks.md)) runs the ES7210 mics and
+the ES8311 codec as 48 kHz 4-slot TDM: slot 0 right mic, 2 left mic, 1 speaker
+reference. Espressif's AFE (type `sr`, `low_cost`, AGC off) does echo
+cancellation and dual-mic separation (BSS). Its output (the unseparated,
+echo-cancelled stream) is the default voice assistant mic; the two separated
+streams (raw 0, raw 1) are exposed as microphones too. Type `sr` rather than
+`fd`: `fd`'s nonlinear processing lowered STT accuracy. `afe_mic_num: "1"` builds a
 single-mic front end for comparison tests.
 
 **Gain.** ES7210 gain is fixed at 24 dB (`es7210_gain_db`). "Mic Gain" in HA
@@ -32,7 +34,15 @@ is a digital trim after the AFE, +15 dB by default: speech at arm's length to
 at 1; the trim already sets the level for both.
 
 **Wake words.** okay_nabu and hey_jarvis, plus "stop" (cutoff 0.75; 0.50
-false-triggered on residual TTS echo). "Stop" is on from the end of a command
+false-triggered on residual TTS echo). One micro_wake_word instance on each
+separated stream (raw 0 on core 0, raw 1 on core 1, 500 ms audio buffer); with a
+talker or TV in the room, one of them usually keeps the voice when the
+unseparated output does not. The first detection acts, and STT gets the stream
+that fired, with that stream's pre-roll; continued conversation keeps the last
+stream, a start without a wake word uses the output. Findings and CPU figures:
+[docs/dual-wake-word.md](docs/dual-wake-word.md). Fixed test parameters (AFE mode,
+echo filter length, AFE VAD, which instances run) are at the end of the
+substitutions. "Stop" is on from the end of a command
 until its reply has played, and while a timer rings. Saying it while a reply
 is pending cancels the reply.
 
@@ -67,8 +77,8 @@ replies should be: the loudness constant (29 dB) plus the "Adaptive volume
 trim" (−6..+6), for sound assumed 46 dB below full scale at the reference
 (typical speech). Room noise is measured on the AFE output before the Mic Gain
 trim. Switch "Adaptive volume reduction", sensor "Adaptive reduction level".
-Diagnostics: Speaker path gain (and per reply), Speaker level (last reply, the
-older method), Echo reduction, Room noise.
+Diagnostics: Room noise and Echo reduction (enabled); Speaker path gain (and per
+reply) disabled by default.
 
 **Boosts.** HA announcements and music play louder than replies by an
 "Announcement boost" and a "Music boost" (HA, −6..+6 dB in 3 dB steps, default
@@ -109,7 +119,8 @@ Night mode caps the LED brightness only.
 published versions: the audio stack fork and adaptive volume by commit, sounds
 and the stop model from this repository at `repo_ref`, the other wake word
 models from a commit of esphome/micro-wake-word-models. The patched
-voice_assistant comes from `components/` here, also at `repo_ref`. After changing a sound
+voice_assistant and micro_wake_word come from `components/` here, also at
+`repo_ref`. After changing a sound
 or model, push it and set `repo_ref` to that commit.
 
 **Battery.** Read on GPIO6, which needs a hardware change: R78 bridged from pad
@@ -118,6 +129,6 @@ Reported every 5 min as the median of 10 readings.
 
 ## License
 
-MIT, except the C++ files of `components/voice_assistant`: they are a copy of
-ESPHome's voice_assistant component with local changes and stay under GPLv3, as
-in ESPHome. See [LICENSE](LICENSE).
+MIT, except the C++ files of `components/voice_assistant` and
+`components/micro_wake_word`: they are copies of ESPHome's components with local
+changes and stay under GPLv3, as in ESPHome. See [LICENSE](LICENSE).

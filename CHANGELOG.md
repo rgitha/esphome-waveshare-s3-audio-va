@@ -4,6 +4,18 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.19
 
+- **.2** Dual wake word in production (branch dual-mww merged into main): one
+  micro_wake_word instance on each separated BSS stream (raw 0 on core 0, raw 1 on
+  core 1, 500 ms buffer, one inference lock), STT on the stream that fired, AFE
+  low_cost. The test YAML became esphome-va-1.yaml with the .19.1 boosts. Former HA
+  test controls (AFE mode, Echo filter length, AFE VAD, Wake word on raw 0 / raw 1 /
+  output) are now fixed test parameters at the end of the substitutions; the
+  output instance stays off. Comparison line and CPU statistics log at debug
+  level. Diagnostics trimmed for production: CPU load, Loop time, Speaker path
+  gain (both), Reset reason disabled by default; Speaker level (last reply) removed
+  (old method). Enabled: Adaptive reduction level, Room noise, Echo reduction,
+  Battery voltage. Stack fork branch rgitha-v2026.11.0 at merge
+  commit b92e0a5 (output boost + result tap + esp_afe microphone platform).
 - **.1** Output boosts: "Announcement boost" and "Music boost" in HA (−6..+6 dB,
   3 dB steps, default +6), added in the audio stack's output gain (stack fork
   `set_output_boost_db()`): total = media player volume + adaptive reduction +
@@ -18,6 +30,38 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.18
 
+- **.11** (TEST, branch dual-mww) The wake word instance switches are remembered
+  across reboots (the output instance starts off), and the automatic starts (Home
+  Assistant connected, OTA error) only start instances whose switch is on.
+- **.10** (TEST, branch dual-mww) AFE mode low_cost at start (echo cancellation
+  as effective, less CPU during playback, less internal RAM); micro_wake_word audio
+  buffer 500 ms (new ring_buffer_duration option in the local copy); CPU statistics:
+  a task rebuilt during an interval no longer shows a wrapped value.
+- **.9** (TEST, branch dual-mww) STT gets the stream whose wake word fired (raw 0,
+  raw 1 or output), with the pre-roll from that stream (voice_assistant copy:
+  stream_microphones, select_stream()). Continued conversation keeps the last
+  stream; the start_va action uses the output. A selected stream that delivers
+  nothing for 500 ms falls back to the output.
+- **.8** (TEST, branch dual-mww; now esphome-va-1-test.yaml, friendly name
+  "Voice Assistant 1 Test") Wake word tasks pinned to a core (new task_core option
+  in the micro_wake_word copy): raw 0 and output on core 0, raw 1 on core 1. Until
+  now each task stayed on whichever core it first used, often both separated
+  streams on core 1 with the AFE feed, which overflowed during replies.
+- **.7** (TEST, branch dual-mww) Runtime controls to measure CPU against quality:
+  AFE mode (sr_high_perf / sr_low_cost), echo filter length (2-4), AFE VAD on/off,
+  and each wake word instance (raw 0, raw 1, output) on/off.
+- **.6** (TEST, branch dual-mww) .5 crashed (StoreProhibited in esp-nn's
+  convolution): esp-nn keeps one convolution scratch buffer for all callers, and
+  two wake word instances ran models at the same time on both cores. Model
+  inference now takes one lock shared by all instances.
+- **.5** (TEST, branch dual-mww) Wake word on both separated (BSS) streams: one
+  micro_wake_word instance on raw 0 and one on raw 1 (patched copy allowing two
+  instances; raw streams from the audio stack fork's dual-mww branch), each with
+  Okay Nabu, Hey Jarvis, stop and the VAD model, plus (test only) a third on the
+  unseparated output for comparison. The first detection acts, the others are
+  logged; every detection or VAD veto gives one comparison line with each stream's
+  peak probability. The voice assistant still streams the unseparated output. CPU
+  statistics per task and core every 60 s (temporary).
 - **.4** adaptive_volume v0.4.3: room noise is the median of 0.5 s block averages
   over 8 s (was the 3rd-largest block peak, capped by a 4.5 s hold), so short sounds
   and occasional talk no longer raise it; sustained sound still does. Smoothing

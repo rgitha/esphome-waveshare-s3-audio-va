@@ -32,6 +32,9 @@ static const size_t SPEAKER_BUFFER_SIZE = 16 * RECEIVE_SIZE;
 // Pre-roll patch: history length (the YAML option is capped at this).
 static const size_t PREROLL_CAPACITY_MS = 1000;
 static const size_t BYTES_PER_MS = SAMPLE_RATE_HZ / 1000 * sizeof(int16_t);
+// Stream selection patch: a selected separated stream that delivers nothing for this
+// long falls back to the output (a live stream delivers a chunk every 16-32 ms)
+static const uint32_t STREAM_STALL_TIMEOUT_MS = 500;
 
 // If one microphone channel keeps producing audio while another configured channel produces none for this
 // long, treat the silent channel as failed and stop the stream. A working microphone exposes a chunk every
@@ -40,52 +43,83 @@ static const uint32_t AUDIO_CHANNEL_STALL_TIMEOUT_MS = 2000;
 
 VoiceAssistant::VoiceAssistant() { global_voice_assistant = this; }
 
-void VoiceAssistant::setup() {
-  this->mic_source_->add_data_callback([this](const std::vector<uint8_t> &data) {
-    std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
-    if (temp_ring_buffer != nullptr) {
-      temp_ring_buffer->write((void *) data.data(), data.size());
-      // Pre-roll patch: the main source is live; the passive one (registered after this, so
-      // called after this for the same chunk) stops forwarding.
-      this->preroll_forwarding_.store(false);
-    }
-  });
+// Stream selection patch: live audio of a stream goes to the ring buffer only while
+// that stream is the run's stream. The normal microphone (output) also watches the
+// selected separated stream and falls back to itself if that one delivers nothing.
+void VoiceAssistant::write_stream_(int stream, const std::vector<uint8_t> &data) {
+  std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
+  if (temp_ring_buffer == nullptr)
+    return;
+  int active = this->active_stream_.load();
+  if (stream == OUTPUT_STREAM && active != OUTPUT_STREAM &&
+      millis() - this->stream_last_data_ms_.load() > STREAM_STALL_TIMEOUT_MS) {
+    this->active_stream_.store(OUTPUT_STREAM);
+    this->stream_fell_back_.store(true);
+    active = OUTPUT_STREAM;
+  }
+  if (stream != active)
+    return;
+  if (stream != OUTPUT_STREAM)
+    this->stream_last_data_ms_.store(millis());
+  temp_ring_buffer->write((void *) data.data(), data.size());
+  // Pre-roll patch: the live source is delivering; the passive one of the same stream
+  // (registered after it, so called after it for the same chunk) stops forwarding.
+  this->preroll_forwarding_.store(false);
+}
 
-  // Pre-roll patch
-  if (this->preroll_source_ != nullptr && this->preroll_ms_ > 0) {
+// Pre-roll patch: keep the last PREROLL_CAPACITY_MS of a stream
+void VoiceAssistant::record_preroll_(PrerollHistory &h, const std::vector<uint8_t> &data) {
+  LockGuard guard(h.lock);
+  const uint8_t *src = data.data();
+  size_t len = data.size();
+  if (len > h.size) {
+    src += len - h.size;
+    len = h.size;
+  }
+  while (len > 0) {
+    size_t n = std::min(len, h.size - h.pos);
+    memcpy(h.buf + h.pos, src, n);
+    h.pos = (h.pos + n) % h.size;
+    h.filled = std::min(h.filled + n, h.size);
+    src += n;
+    len -= n;
+  }
+}
+
+void VoiceAssistant::setup() {
+  this->mic_source_->add_data_callback(
+      [this](const std::vector<uint8_t> &data) { this->write_stream_(OUTPUT_STREAM, data); });
+  // Stream selection patch: the separated streams' live sources (before their passive
+  // pre-roll sources, see write_stream_)
+  for (int k = 0; k < OUTPUT_STREAM; k++) {
+    if (this->stream_live_[k] != nullptr)
+      this->stream_live_[k]->add_data_callback(
+          [this, k](const std::vector<uint8_t> &data) { this->write_stream_(k, data); });
+  }
+
+  // Pre-roll patch: one history per stream
+  for (int k = 0; k < MAX_STREAMS && this->preroll_ms_ > 0; k++) {
+    PrerollHistory &h = this->preroll_[k];
+    if (h.source == nullptr)
+      continue;
     RAMAllocator<uint8_t> allocator;
-    this->preroll_history_size_ = PREROLL_CAPACITY_MS * BYTES_PER_MS;
-    this->preroll_history_ = allocator.allocate(this->preroll_history_size_);
-    if (this->preroll_history_ == nullptr) {
-      ESP_LOGW(TAG, "Could not allocate pre-roll history; pre-roll off");
-      this->preroll_ms_ = 0;
-    } else {
-      this->preroll_source_->add_data_callback([this](const std::vector<uint8_t> &data) {
-        {
-          LockGuard guard(this->preroll_lock_);
-          const uint8_t *src = data.data();
-          size_t len = data.size();
-          if (len > this->preroll_history_size_) {
-            src += len - this->preroll_history_size_;
-            len = this->preroll_history_size_;
-          }
-          while (len > 0) {
-            size_t n = std::min(len, this->preroll_history_size_ - this->preroll_write_pos_);
-            memcpy(this->preroll_history_ + this->preroll_write_pos_, src, n);
-            this->preroll_write_pos_ = (this->preroll_write_pos_ + n) % this->preroll_history_size_;
-            this->preroll_filled_ = std::min(this->preroll_filled_ + n, this->preroll_history_size_);
-            src += n;
-            len -= n;
-          }
-        }
-        if (this->preroll_forwarding_.load()) {
-          std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
-          if (temp_ring_buffer != nullptr) {
-            temp_ring_buffer->write((void *) data.data(), data.size());
-          }
-        }
-      });
+    h.size = PREROLL_CAPACITY_MS * BYTES_PER_MS;
+    h.buf = allocator.allocate(h.size);
+    if (h.buf == nullptr) {
+      ESP_LOGW(TAG, "Could not allocate pre-roll history for stream %d; pre-roll off for it", k);
+      h.size = 0;
+      continue;
     }
+    h.source->add_data_callback([this, k](const std::vector<uint8_t> &data) {
+      PrerollHistory &hist = this->preroll_[k];
+      this->record_preroll_(hist, data);
+      if (this->preroll_forwarding_.load() && this->active_stream_.load() == k) {
+        std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
+        if (temp_ring_buffer != nullptr) {
+          temp_ring_buffer->write((void *) data.data(), data.size());
+        }
+      }
+    });
   }
 
   // Second microphone channel
@@ -171,34 +205,35 @@ size_t VoiceAssistant::ring_buffer_size_() const { return RING_BUFFER_SIZE + thi
 
 // Pre-roll patch: copy the last preroll_ms_ of history into the (cleared) ring buffer and
 // keep forwarding live audio until the main source takes over.
-void VoiceAssistant::apply_preroll_() {
+void VoiceAssistant::apply_preroll_(int stream) {
   std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
-  if (temp_ring_buffer == nullptr || this->preroll_history_ == nullptr) {
+  if (temp_ring_buffer == nullptr || stream < 0 || stream >= MAX_STREAMS || this->preroll_[stream].buf == nullptr) {
     return;
   }
+  PrerollHistory &h = this->preroll_[stream];
   char profile[PREROLL_CAPACITY_MS / 50 * 5 + 1];
   size_t profile_len = 0;
   size_t sent = 0;
   {
-    LockGuard guard(this->preroll_lock_);
-    const size_t size = this->preroll_history_size_;
-    const size_t want = std::min<size_t>(this->preroll_ms_ * BYTES_PER_MS, this->preroll_filled_);
-    size_t pos = (this->preroll_write_pos_ + size - want) % size;
+    LockGuard guard(h.lock);
+    const size_t size = h.size;
+    const size_t want = std::min<size_t>(this->preroll_ms_ * BYTES_PER_MS, h.filled);
+    size_t pos = (h.pos + size - want) % size;
     while (sent < want) {
       size_t n = std::min(want - sent, size - pos);
-      temp_ring_buffer->write((void *) (this->preroll_history_ + pos), n);
+      temp_ring_buffer->write((void *) (h.buf + pos), n);
       pos = (pos + n) % size;
       sent += n;
     }
     // Level of the whole history in 50 ms blocks, oldest first (dBFS RMS), for tuning:
     // the last block is the moment the run started.
     const size_t block = 50 * BYTES_PER_MS;
-    size_t start = (this->preroll_write_pos_ + size - this->preroll_filled_) % size;
-    for (size_t b = 0; b + block <= this->preroll_filled_ && profile_len + 5 < sizeof(profile); b += block) {
+    size_t start = (h.pos + size - h.filled) % size;
+    for (size_t b = 0; b + block <= h.filled && profile_len + 5 < sizeof(profile); b += block) {
       int64_t sum = 0;
       for (size_t i = 0; i < block; i += 2) {
         size_t k = (start + b + i) % size;
-        int16_t v = (int16_t) (this->preroll_history_[k] | (this->preroll_history_[(k + 1) % size] << 8));
+        int16_t v = (int16_t) (h.buf[k] | (h.buf[(k + 1) % size] << 8));
         sum += (int32_t) v * v;
       }
       float rms = std::sqrt((float) sum / (block / 2));
@@ -384,6 +419,9 @@ void VoiceAssistant::handle_channel_stall_(size_t available, size_t available2) 
 }
 
 void VoiceAssistant::loop() {
+  if (this->stream_fell_back_.exchange(false)) {
+    ESP_LOGW(TAG, "STT stream delivered nothing for %u ms: switched to the output", (unsigned) STREAM_STALL_TIMEOUT_MS);
+  }
   if (this->api_client_ == nullptr && this->state_ != State::IDLE && this->state_ != State::STOP_MICROPHONE &&
       this->state_ != State::STOPPING_MICROPHONE) {
     if (this->mic_source_->is_running() || (this->mic_source2_ && this->mic_source2_->is_running()) ||
@@ -418,16 +456,35 @@ void VoiceAssistant::loop() {
       }
       this->clear_buffers_();
 
+      // Stream selection patch: the stream for this run (a separated stream without a
+      // live source falls back to the output)
+      {
+        int stream = this->selected_stream_.load();
+        if (stream != OUTPUT_STREAM && (this->mic_source2_ != nullptr || this->stream_live_[stream] == nullptr))
+          stream = OUTPUT_STREAM;
+        this->active_stream_.store(stream);
+        this->stream_last_data_ms_.store(millis());
+        this->stream_fell_back_.store(false);
+        static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
+        ESP_LOGI(TAG, "STT stream: %s", NAMES[stream]);
+      }
+
       // Pre-roll patch: only for a start by the wake word (not continued conversation, not
       // a button), and only with a single mic channel (keeps two channels aligned).
       if (this->preroll_armed_) {
         this->preroll_armed_ = false;
         if (this->mic_source2_ == nullptr) {
-          this->apply_preroll_();
+          this->apply_preroll_(this->active_stream_.load());
         }
       }
 
       this->mic_source_->start();
+      // Stream selection patch: start the separated stream's live source as well (the
+      // normal microphone keeps running: it carries the run's state and the fallback)
+      if (this->active_stream_.load() != OUTPUT_STREAM) {
+        this->live_started_ = this->active_stream_.load();
+        this->stream_live_[this->live_started_]->start();
+      }
       if (this->mic_source2_) {
         this->mic_source2_->start();
       }
@@ -508,6 +565,12 @@ void VoiceAssistant::loop() {
       break;
     }
     case State::STOP_MICROPHONE: {
+      // Stream selection patch: stop the separated stream's live source (its microphone
+      // keeps running for the wake word, so there is nothing to wait for)
+      if (this->live_started_ >= 0) {
+        this->stream_live_[this->live_started_]->stop();
+        this->live_started_ = -1;
+      }
       // Check both microphone channels
       bool is_running = this->mic_source_->is_running();
       bool is_running2 = false;
