@@ -2,6 +2,15 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.20
+
+- **.1-.11** (TEST, branch doa-probe) Direction of arrival probe: SRP-PHAT on the two
+  raw mics (stack fork branch doa: mic tap), teal LED at the direction and coral at its
+  mirror, calibration (effective spacing 24.5 mm, left mic 10 us), voice from
+  micro_wake_word's VAD, LED direction = 1 s median after 0.5 s of frames, held 1.5 s.
+  AFE VAD off, Voice Detected removed, OTA fill 70 %. Based on the production candidate
+  2026.11.19.2. Findings: docs/doa-probe.md.
+
 ## 2026.11.18
 
 - **.11** (TEST, branch dual-mww) The wake word instance switches are remembered
