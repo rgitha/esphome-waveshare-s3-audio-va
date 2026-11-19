@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.20.4"
+  fw_version: "2026.11.20.5"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -59,7 +59,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: e66358b25d5980513188a4fad72ff3c72d3db96f
+  repo_ref: 5367e400a804e3c1ab0d68da3994e7c1db0ef20a
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -627,12 +627,21 @@ light:
               const float ang = id(doa).get_live_angle();
               if (!std::isnan(ang)) {
                 const Col TEAL{0.0f, 0.6f, 0.55f};
-                auto led_for = [&](float phi) {  // phi: deg from the right mic's side
-                  const float steps = (phi - 90.0f) / (360.0f / N) * ${doa_led_dir};
-                  return (((${doa_led_ref} + static_cast<int>(lroundf(steps))) % N) + N) % N;
+                // Position between LEDs: the two neighbours share the teal by distance
+                // (linear light), so a direction between LEDs (the mirror image often
+                // is, with 7 LEDs) still moves smoothly.
+                float teal_w[N] = {0};
+                auto place = [&](float phi) {  // phi: deg from the right mic's side
+                  const float pos = ${doa_led_ref} + (phi - 90.0f) / (360.0f / N) * ${doa_led_dir};
+                  const float f = floorf(pos), frac = pos - f;
+                  const int i0 = ((static_cast<int>(f) % N) + N) % N, i1 = (i0 + 1) % N;
+                  teal_w[i0] = std::max(teal_w[i0], 1.0f - frac);
+                  teal_w[i1] = std::max(teal_w[i1], frac);
                 };
-                shown[led_for(ang)] = TEAL;
-                shown[led_for(360.0f - ang)] = TEAL;
+                place(ang);
+                place(360.0f - ang);
+                for (int i = 0; i < N; i++)
+                  if (teal_w[i] > 0.02f) shown[i] = mix(out[i], TEAL, teal_w[i]);
               }
             }
 
@@ -962,6 +971,9 @@ doa_probe:
   frame_samples: 1024
   log_interval: 2s
   level_threshold: -60
+  # log line and sensor only while the AFE VAD hears voice, and only when the
+  # direction moved 10 deg or more (wake word lines always)
+  change_threshold: 10
   task_core: 0
   # starts 90 s after boot (allocations, task and taps), after the boot is marked good:
   # a crash in the probe then cannot put the device into safe mode
