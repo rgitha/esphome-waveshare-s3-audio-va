@@ -27,6 +27,7 @@ class DoaProbe : public Component {
   void set_frame_samples(int n) { this->frame_samples_ = n; }
   void set_log_interval(uint32_t ms) { this->log_interval_ms_ = ms; }
   void set_level_threshold(float db) { this->level_threshold_db_ = db; }
+  void set_change_threshold(float deg) { this->change_threshold_ = deg; }
   void set_swap_mics(bool swap) { this->swap_mics_ = swap; }
   void set_task_core(int core) { this->task_core_ = core; }
   void set_start_delay(uint32_t ms) { this->start_delay_ms_ = ms; }
@@ -58,6 +59,8 @@ class DoaProbe : public Component {
   int frame_samples_{1024};
   uint32_t log_interval_ms_{2000};
   float level_threshold_db_{-60.0f};
+  float change_threshold_{10.0f};
+  float last_reported_{NAN};
   bool swap_mics_{false};
   int task_core_{0};
   uint32_t start_delay_ms_{90000};
@@ -83,6 +86,7 @@ class DoaProbe : public Component {
   portMUX_TYPE energy_lock_ = portMUX_INITIALIZER_UNLOCKED;
   double energy_[3]{0, 0, 0};
   uint32_t energy_samples_{0};
+  uint32_t vad_speech_frames_{0};  // AFE fetch results with VAD = speech since the last summary
 
   uint32_t last_log_ms_{0};
   uint32_t last_live_ms_{0};

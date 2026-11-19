@@ -23,6 +23,7 @@ CONF_SWAP_MICS = "swap_mics"
 CONF_ANGLE = "angle"
 CONF_TASK_CORE = "task_core"
 CONF_START_DELAY = "start_delay"
+CONF_CHANGE_THRESHOLD = "change_threshold"
 CONF_MIN_FREE_INTERNAL = "min_free_internal"
 
 doa_probe_ns = cg.esphome_ns.namespace("doa_probe")
@@ -39,6 +40,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_LOG_INTERVAL, default="2s"): cv.positive_time_period_milliseconds,
         # frames quieter than this (dBFS, mean of both mics) are left out of the angle
         cv.Optional(CONF_LEVEL_THRESHOLD, default=-60.0): cv.float_range(min=-120.0, max=0.0),
+        # report (log line, sensor) only while the AFE VAD hears voice, and only when the
+        # direction moved by at least this much (deg) since the last report
+        cv.Optional(CONF_CHANGE_THRESHOLD, default=10.0): cv.float_range(min=0.0, max=180.0),
         # 0 deg = right mic's side (transport mic 0, slot 0); swap if the angle runs backwards
         cv.Optional(CONF_SWAP_MICS, default=False): cv.boolean,
         cv.Optional(CONF_TASK_CORE, default=0): cv.int_range(min=0, max=1),
@@ -67,6 +71,7 @@ async def to_code(config):
     cg.add(var.set_frame_samples(config[CONF_FRAME_SAMPLES]))
     cg.add(var.set_log_interval(config[CONF_LOG_INTERVAL]))
     cg.add(var.set_level_threshold(config[CONF_LEVEL_THRESHOLD]))
+    cg.add(var.set_change_threshold(config[CONF_CHANGE_THRESHOLD]))
     cg.add(var.set_swap_mics(config[CONF_SWAP_MICS]))
     cg.add(var.set_task_core(config[CONF_TASK_CORE]))
     cg.add(var.set_start_delay(config[CONF_START_DELAY]))

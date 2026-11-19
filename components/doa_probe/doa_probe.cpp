@@ -120,6 +120,8 @@ void DoaProbe::result_tap_cb_(const esp_afe::EspAfe::ResultTap &tap, void *ctx) 
   for (int c = 0; c < 3; c++)
     self->energy_[c] += e[c];
   self->energy_samples_ += tap.samples;
+  if (tap.vad_state == 1)  // VAD_SPEECH
+    self->vad_speech_frames_++;
   portEXIT_CRITICAL(&self->energy_lock_);
 }
 
@@ -170,8 +172,11 @@ void DoaProbe::summarize_(uint32_t since_ms, uint32_t now, const char *label, bo
       loud.push_back(r.angle);
   }
   double e[3];
-  uint32_t es;
+  uint32_t es, vad;
   portENTER_CRITICAL(&this->energy_lock_);
+  vad = this->vad_speech_frames_;
+  if (publish)
+    this->vad_speech_frames_ = 0;
   for (int c = 0; c < 3; c++) {
     e[c] = this->energy_[c];
     if (publish)
@@ -186,21 +191,29 @@ void DoaProbe::summarize_(uint32_t since_ms, uint32_t now, const char *label, bo
     return ms > 1e-12 ? 10.0 * std::log10(ms) : -120.0;
   };
   const uint32_t dropped = this->dropped_bytes_.exchange(0, std::memory_order_relaxed);
-  if (loud.empty()) {
-    ESP_LOGD(TAG, "%s: no frame above %.0f dBFS (%d frames, peak %.0f dBFS) | raw0 %.0f raw1 %.0f raw2 %.0f dBFS%s",
-             label, this->level_threshold_db_, frames, peak_level, db(e[0]), db(e[1]), db(e[2]),
-             dropped ? " | mic audio dropped" : "");
-    if (publish && this->angle_sensor_ != nullptr)
-      this->angle_sensor_->publish_state(NAN);
+  if (dropped)
+    ESP_LOGW(TAG, "Mic audio dropped (%u bytes): the DOA task is behind", (unsigned) dropped);
+  if (loud.empty() || (publish && vad == 0)) {  // no voice
+    if (!publish) {
+      ESP_LOGD(TAG, "%s: no voice (peak %.0f dBFS)", label, peak_level);
+    } else if (!std::isnan(this->last_reported_)) {
+      this->last_reported_ = NAN;
+      if (this->angle_sensor_ != nullptr)
+        this->angle_sensor_->publish_state(NAN);
+    }
     return;
   }
   std::sort(loud.begin(), loud.end());
   const size_t m = loud.size();
   const float median = loud[m / 2], lo = loud[m / 10], hi = loud[m - 1 - m / 10];
+  if (publish) {  // periodic: only on a new direction
+    if (!std::isnan(this->last_reported_) && std::fabs(median - this->last_reported_) < this->change_threshold_)
+      return;
+    this->last_reported_ = median;
+  }
   ESP_LOGD(TAG, "%s: %.0f deg (median of %u/%d frames, 10-90%% %.0f..%.0f), peak %.0f dBFS | raw0 %.0f raw1 %.0f "
                 "raw2 %.0f dBFS%s",
-           label, median, (unsigned) m, frames, lo, hi, peak_level, db(e[0]), db(e[1]), db(e[2]),
-           dropped ? " | mic audio dropped" : "");
+           label, median, (unsigned) m, frames, lo, hi, peak_level, db(e[0]), db(e[1]), db(e[2]), "");
   if (publish && this->angle_sensor_ != nullptr)
     this->angle_sensor_->publish_state(median);
 }
