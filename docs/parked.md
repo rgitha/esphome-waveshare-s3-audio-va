@@ -72,11 +72,3 @@ expected to work, but a failing build after an add-on update starts here.
 - No gain ramp: the boost changes at media player state changes (mostly where a
   stream starts). Add a short ramp in the stack's output gain if clicks are heard when
   music starts or an announcement interrupts it.
-
-## Repository housekeeping
-
-- Delete the merged branches on GitHub (the session's proxy refuses branch deletes):
-  - repo rgitha/esphome-audio-stack: `boost` and `dual-mww` (both merged into
-    `rgitha-prod`);
-  - repo rgitha/esphome-adaptive-volume: `noise-median` and `coherent-s` (both merged
-    into `main`).
