@@ -8,12 +8,24 @@ ESPHome Home Assistant voice satellite for the Waveshare ESP32-S3-AUDIO-Board.
 | `CHANGELOG.md` | Firmware version history |
 | `sounds/` | Chimes made by `make_chimes.py`, and Voice PE sounds |
 | `models/` | The "Stop" wake word model |
-| `components/voice_assistant/` | ESPHome's voice_assistant with the wake-word pre-roll patch |
+| `components/voice_assistant/` | ESPHome's voice_assistant with the wake-word pre-roll and STT stream selection |
+| `components/micro_wake_word/` | ESPHome's micro_wake_word allowing several instances (wake word on each BSS stream) |
+| `patches/` | The changes in both copies as patches against ESPHome (`BASE`), and `regen.sh` |
+| `docs/` | Audio stack forks and design; dual wake word findings |
 
 The YAML needs ESPHome 2026.10 or later and a `secrets.yaml` with `wifi_ssid`,
 `wifi_password` and `api_key_esp32_audio_board` (ignored by git). Tunables are
-at the top of `substitutions`. The patched voice_assistant is loaded from this
-repository's `components/` at `repo_ref`, like the sounds and the stop model.
+at the top of `substitutions`. The patched voice_assistant and micro_wake_word are
+loaded from this repository's `components/` at `repo_ref`, like the sounds and the
+stop model.
+
+**Patches.** `patches/<component>.patch` holds our changes to each copy against the
+ESPHome version in `patches/BASE`. After changing a copy, run `patches/regen.sh diff`
+and commit the patch with it. To move to a newer ESPHome, `patches/regen.sh apply
+<version>` merges our changes onto that release (three-way; conflicts are left as
+markers and listed); build and test, then set `BASE` to that version and run `diff`.
+A part that upstream has taken over shows up as a conflict or an empty change: drop
+it from the copy. Needs bash and git.
 
 ## Design notes
 
