@@ -1,5 +1,5 @@
 """DOA probe (test): direction of arrival from the two raw microphones (before the
-AFE) with Espressif's esp_doa (SRP-PHAT, two mics, 0-180 degrees), logged with the
+AFE) with SRP-PHAT (srp_phat.h; two mics, 0-180 degrees), logged with the
 levels of the AFE's three raw_data streams (BSS raw 0, raw 1, unseparated raw 2).
 
 Needs the esp_afe mic tap (rgitha/esphome-audio-stack, branch doa).
@@ -39,7 +39,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_LOG_INTERVAL, default="2s"): cv.positive_time_period_milliseconds,
         # frames quieter than this (dBFS, mean of both mics) are left out of the angle
         cv.Optional(CONF_LEVEL_THRESHOLD, default=-60.0): cv.float_range(min=-120.0, max=0.0),
-        # transport mic 0 is passed as "right", mic 1 as "left"; swap if the angle runs backwards
+        # 0 deg = right mic's side (transport mic 0, slot 0); swap if the angle runs backwards
         cv.Optional(CONF_SWAP_MICS, default=False): cv.boolean,
         cv.Optional(CONF_TASK_CORE, default=0): cv.int_range(min=0, max=1),
         # start this long after boot (after ESPHome has marked the boot good), so a

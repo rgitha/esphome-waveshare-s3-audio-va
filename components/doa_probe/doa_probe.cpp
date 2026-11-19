@@ -11,9 +11,6 @@
 #include <cmath>
 #include <vector>
 
-extern "C" {
-#include "esp_doa.h"
-}
 
 namespace esphome::doa_probe {
 
@@ -21,6 +18,9 @@ static const char *const TAG = "doa_probe";
 static constexpr int SAMPLE_RATE = 16000;
 static constexpr size_t RING_BYTES = SAMPLE_RATE / 2 * 2 * sizeof(int16_t);  // 0.5 s, two channels
 static constexpr uint32_t TASK_STACK = 6144;  // internal RAM
+// Band for the direction estimate: speech, and below spatial aliasing (c / 2d = 4.9 kHz at 35 mm)
+static constexpr float BAND_LO_HZ = 200.0f;
+static constexpr float BAND_HI_HZ = 4500.0f;
 
 static float level_dbfs(const int16_t *a, const int16_t *b, int n) {
   double sum = 0;
@@ -51,18 +51,15 @@ void DoaProbe::start_() {
     this->state_ = State::GAVE_UP;
     return;
   }
-  this->doa_ = esp_doa_create(SAMPLE_RATE, this->resolution_, this->mic_distance_, this->frame_samples_);
-  const size_t free1 = free_internal();
-  ESP_LOGI(TAG, "esp_doa_create: %s, internal RAM used %d (free %u)", this->doa_ ? "ok" : "FAILED",
-           (int) free0 - (int) free1, (unsigned) free1);
-  if (this->doa_ == nullptr) {
-    this->state_ = State::GAVE_UP;
-    return;
-  }
-  if (free1 < this->min_free_internal_ / 2) {
-    ESP_LOGE(TAG, "Not starting: esp_doa left too little internal RAM");
-    esp_doa_destroy(this->doa_);
-    this->doa_ = nullptr;
+  // SRP-PHAT buffers in PSRAM (allocated once, never freed while running)
+  const bool ok = this->srp_.init(this->frame_samples_, SAMPLE_RATE, this->mic_distance_, this->resolution_, BAND_LO_HZ,
+                                  BAND_HI_HZ, [](size_t bytes) -> void * {
+                                    return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                  });
+  ESP_LOGI(TAG, "SRP-PHAT init %s: bins %d..%d (%.0f-%.0f Hz), %d angles, internal RAM free %u", ok ? "ok" : "FAILED",
+           this->srp_.k_lo(), this->srp_.k_hi(), BAND_LO_HZ, BAND_HI_HZ, this->srp_.num_angles(),
+           (unsigned) free_internal());
+  if (!ok) {
     this->state_ = State::GAVE_UP;
     return;
   }
@@ -85,7 +82,7 @@ void DoaProbe::start_() {
 
 void DoaProbe::dump_config() {
   ESP_LOGCONFIG(TAG,
-                "DOA probe (esp_doa, SRP-PHAT):\n"
+                "DOA probe (SRP-PHAT, 0 deg = right mic side, 90 = broadside, 180 = left mic side):\n"
                 "  Mic distance: %.3f m\n"
                 "  Resolution: %.0f deg\n"
                 "  Frame: %d samples (%d ms)\n"
@@ -150,8 +147,8 @@ void DoaProbe::task_(void *arg) {
       left[i] = inter[2 * i + 1];
     }
     const float level = level_dbfs(left, right, n);
-    const float angle = self->swap_mics_ ? esp_doa_process(self->doa_, right, left)
-                                         : esp_doa_process(self->doa_, left, right);
+    // near = right mic: 0 deg on the right mic's side, 180 deg on the left's
+    const float angle = self->swap_mics_ ? self->srp_.process(left, right) : self->srp_.process(right, left);
     const uint32_t k = self->result_count_.load(std::memory_order_relaxed);
     self->results_[k % RESULTS] = {millis(), angle, level};
     self->result_count_.store(k + 1, std::memory_order_release);
@@ -217,6 +214,25 @@ void DoaProbe::loop() {
   }
   if (this->state_ != State::RUNNING)
     return;
+  if (now - this->last_live_ms_ >= 100) {
+    this->last_live_ms_ = now;
+    const uint32_t count = this->result_count_.load(std::memory_order_acquire);
+    float a[RESULTS];
+    int m = 0;
+    for (uint32_t i = 0; i < (uint32_t) RESULTS && i < count; i++) {
+      const Result &r = this->results_[(count - 1 - i) % RESULTS];
+      if (now - r.ms > 500)
+        break;
+      if (r.level_db >= this->level_threshold_db_ && r.angle >= 0)
+        a[m++] = r.angle;
+    }
+    if (m == 0) {
+      this->live_angle_ = NAN;
+    } else {
+      std::sort(a, a + m);
+      this->live_angle_ = a[m / 2];
+    }
+  }
   if (now - this->last_log_ms_ < this->log_interval_ms_)
     return;
   this->summarize_(this->last_log_ms_, now, "DOA", true);

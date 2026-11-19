@@ -6,15 +6,16 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/ring_buffer/ring_buffer.h"
 #include "esphome/components/esp_afe/esp_afe.h"
+#include "srp_phat.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <string>
 
-struct doa_handle_t;
 
 namespace esphome::doa_probe {
 
@@ -39,6 +40,9 @@ class DoaProbe : public Component {
 
   /// Log the angle over the last 2 s, labelled (e.g. at a wake word).
   void log_event(const std::string &label);
+  /// Median angle of the loud frames in the last 0.5 s (deg), NAN if none. Updated
+  /// every 100 ms; for the LED display.
+  float get_live_angle() const { return this->live_angle_; }
 
  protected:
   static void mic_tap_cb_(const esp_afe::EspAfe::MicTap &tap, void *ctx);
@@ -61,7 +65,7 @@ class DoaProbe : public Component {
   enum class State { WAITING, RUNNING, GAVE_UP } state_{State::WAITING};
 
   std::unique_ptr<ring_buffer::RingBuffer> ring_;
-  doa_handle_t *doa_{nullptr};
+  SrpPhat srp_;
   TaskHandle_t task_handle_{nullptr};
   std::atomic<uint32_t> dropped_bytes_{0};
 
@@ -81,6 +85,8 @@ class DoaProbe : public Component {
   uint32_t energy_samples_{0};
 
   uint32_t last_log_ms_{0};
+  uint32_t last_live_ms_{0};
+  float live_angle_{NAN};
 };
 
 }  // namespace esphome::doa_probe
