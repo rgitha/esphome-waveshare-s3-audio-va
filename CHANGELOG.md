@@ -2,6 +2,20 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.19
+
+- **.1** Output boosts: "Announcement boost" and "Music boost" in HA (−6..+6 dB,
+  3 dB steps, default +6), added in the audio stack's output gain (stack fork
+  `set_output_boost_db()`): total = media player volume + adaptive reduction +
+  boost, capped at 0 dBFS. Independent of adaptive volume (the announcement offset
+  used to lower the adaptive reduction, so it did nothing with adaptive volume off
+  or at 0). adaptive_volume v0.4.4 (announcement offset removed). Action
+  `set_announcement_offset` renamed `urgent_announcement`. Renamed: switch
+  "Adaptive volume reduction" (was "Adaptive volume"), number "Adaptive volume
+  trim" (was "offset"), sensor "Adaptive reduction level" (was "Adaptive volume
+  reduction"). Loudness constant 29 dB (was 26). Mic Gain max +15 dB (was +18).
+  Pilot light level as a percentage, 35 % (was 90 of 255).
+
 ## 2026.11.18
 
 - **.4** adaptive_volume v0.4.3: room noise is the median of 0.5 s block averages

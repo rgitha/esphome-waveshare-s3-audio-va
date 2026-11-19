@@ -16,24 +16,26 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.18.4"
+  fw_version: "2026.11.19.1"
 
   # ---- Tunables -------------------------------------------------------------
 
-  # Adaptive volume: attenuation A = clamp(S - room noise - (C + offset), 0, max),
+  # ---- Output levels (dB) ----
+  # Adaptive volume reduction: A = clamp(S - room noise - (C + trim), 0, max),
   # S = speaker-to-mic path gain + analogue gain (measured, constant for the hardware)
-  loudness_constant_db: "26"  # C: reply this far above the room at full slider (assumes the speaker output 46 dB below full scale); the HA offset adds -6..+6
+  loudness_constant_db: "29"  # C: reply this far above the room at full slider (assumes the speaker output 46 dB below full scale); the HA trim adds -6..+6
+  # Boosts over the media player volume (the reply level), applied by the audio stack
+  # after the mixer; the total is capped at 0 dBFS, so near full volume a boost has
+  # less effect. Independent of adaptive volume. Announcement and music boosts are HA
+  # settings (-6..+6 dB, 3 dB steps); these are their first-boot values. Chimes,
+  # replies and timers/alarms get no boost.
+  announcement_boost_db: "6"  # HA announcements (assist_satellite.announce, with the pre-announcement chime)
+  music_boost_db: "6"         # music (http media and Sendspin)
+  urgent_boost_db: "6"        # extra, for the next announcement after the urgent_announcement action
   max_attenuation_db: "30"    # largest adaptive reduction
   # Volume range (each used in two places, so they cannot drift apart)
   master_volume_min_db: "-40" # codec master volume floor (audio stack and adaptive volume)
   media_volume_min: "0.1"     # media player volume_min (media player and adaptive volume)
-
-  # Output offsets over the adapted volume for HA announcements (assist_satellite.announce,
-  # including the pre-announcement chime), dB. Applied by lowering the adaptive
-  # reduction, so the ceiling is 0 dB (no effect when the reduction is 0).
-  # Chimes, TTS replies and timers/alarms get no offset.
-  announcement_offset_db: "6"
-  urgent_offset_db: "6"       # extra, for the next announcement after the set_announcement_offset action
 
   es7210_gain_db: "24.0" # mic ADC gain, fixed at boot; 3 dB steps. 24 + Mic Gain trim 15 = speech about -27 dBFS at arm's length
   # Front-end mic mode (build time; changing it needs Clean Build Files):
@@ -49,7 +51,7 @@ substitutions:
   # LED transitions (ms): crossfades and the fill from / empty into the pilot take this
   # long; the thinking comet, and the moves into and out of it, go round in twice this.
   led_transition_ms: '250'
-  pilot_dim: '90' # pilot light level, 0..255 of the ring brightness
+  pilot_level: '35' # pilot light level, % of the ring brightness
 
   hidden_ssid: "false"
 
@@ -230,9 +232,9 @@ api:
                 id(saved_alarm_time) = alarm_time_hh_mm;
               }
     # Urgent announcement: call just before assist_satellite.announce; the
-    # next HA announcement within 10 s gets
-    # urgent_offset_db on top of announcement_offset_db.
-    - action: set_announcement_offset
+    # next HA announcement within 10 s gets urgent_boost_db on top of the
+    # announcement boost.
+    - action: urgent_announcement
       then:
         - lambda: |-
             id(urgent_pending) = true;
@@ -274,7 +276,7 @@ ota:
               const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
               // the strip's colour correction applies the ring brightness and gamma;
               // the dim level matches the pilot light
-              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_dim}, 0);
+              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_level} * 255 / 100, 0);
             }
             strip->write_state(id(status_ring));  // id() is already the LightState pointer
     on_progress:
@@ -296,7 +298,7 @@ ota:
               const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
               // the strip's colour correction applies the ring brightness and gamma;
               // the dim level matches the pilot light
-              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_dim}, 0);
+              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_level} * 255 / 100, 0);
             }
             strip->write_state(id(status_ring));  // id() is already the LightState pointer
     on_error:
@@ -383,7 +385,7 @@ light:
             constexpr int TAIL = N - 1;                                   // comet tail: the whole ring
             const float D = ${led_transition_ms};
             const float STEP = D / N, CSTEP = 2.0f * D / N;               // fills: a circle in D; comet: in 2 x D
-            const float PILOT = ${pilot_dim} / 255.0f, BG = PILOT / 2;    // comet background: half the pilot level
+            const float PILOT = ${pilot_level} / 100.0f, BG = PILOT / 2;    // comet background: half the pilot level
             enum { IDLE, RING, FLASH, BREATHE_SLOW, BREATHE_FAST, SPIN, TIMER, VOLUME };
             enum { NONE, XFADE, FILL, GATHER, TO_PULSE, EMPTY, SPIN_TO_IDLE };
             struct Col { float r, g, b; };
@@ -583,13 +585,13 @@ light:
           width: 7
 
 external_components:
-  # Backup fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus one commit that
-  # takes Espressif's GMF AI Audio 1.1.2 from the component registry instead of
-  # the n-IA-hane/esp-gmf fork. Pinned by commit.
-  - source: github://rgitha/esphome-audio-stack@487db8fd33a41ba2c0b48f8abeb9df5a276c3d68
+  # Fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus Espressif's GMF AI Audio
+  # 1.1.2 from the component registry (instead of the n-IA-hane/esp-gmf fork) and the
+  # output boost (set_output_boost_db). Branch boost, pinned by commit.
+  - source: github://rgitha/esphome-audio-stack@d3e38c165e823acd97c6c32939f90dbc5db23f9c
     components: [esp_audio_stack, esp_afe]
-  # v0.4.3, pinned by commit
-  - source: github://rgitha/esphome-adaptive-volume@dd7a8f72891f5373fa9a54cd6279b8fee920751b
+  # v0.4.4 (branch boost-out), pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@8db7c7113402045ee140d9fba0e2fb5536d3434f
     components: [adaptive_volume]
   # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
   # repository's components/ at repo_ref
@@ -677,7 +679,7 @@ esp_afe:
 # In a quiet room all sound is turned down via the codec master volume; the HA
 # volume slider is the level in a loud room and never moves. The device
 # calibrates itself on its own spoken replies (speaker level S).
-# Attenuation A = clamp(S - room noise - (loudness_constant + offset), 0, max).
+# Attenuation A = clamp(S - room noise - (loudness_constant + trim), 0, max).
 adaptive_volume:
   id: adaptive
   esp_audio_stack_id: audio_stack
@@ -707,10 +709,10 @@ adaptive_volume:
   master_volume_min_db: ${master_volume_min_db}
   media_volume_min: ${media_volume_min}
   enable:
-    name: Adaptive volume
+    name: Adaptive volume reduction
     entity_category: config
   offset:
-    name: Adaptive volume offset
+    name: Adaptive volume trim
     mode: slider
   room_noise:
     name: Room noise
@@ -723,7 +725,7 @@ adaptive_volume:
   speaker_level_reply:
     name: Speaker level (last reply)
   attenuation:
-    name: Adaptive volume reduction
+    name: Adaptive reduction level
   current_volume:
     name: Current volume
   # Diagnostic after each stretch of playback (1.5 s or longer)
@@ -839,19 +841,20 @@ media_player:
                 id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
             - script.execute: control_leds
     on_state:
-      if:
-        condition:
-          and:
-            - switch.is_off: timer_ringing
-            - not:
-                voice_assistant.is_running:
-            - not:
-                media_player.is_announcing: external_media_player
-        then:
-          - mixer_speaker.apply_ducking:
-              id: media_mixing_input
-              decibel_reduction: 0
-              duration: 1.0s
+      - script.execute: update_boost
+      - if:
+          condition:
+            and:
+              - switch.is_off: timer_ringing
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing: external_media_player
+          then:
+            - mixer_speaker.apply_ducking:
+                id: media_mixing_input
+                decibel_reduction: 0
+                duration: 1.0s
     on_mute:
       - delay: 100ms  # Debounce
       - script.execute: control_leds_volume_changed
@@ -1012,10 +1015,11 @@ voice_assistant:
   # When the voice assistant starts: Play a wake up sound, duck audio.
   on_start:
     # A run (wake word, start_va, or a conversation continued after an
-    # announcement): its TTS reply gets no output offset.
+    # announcement): its TTS reply gets no boost.
     - lambda: |-
         id(va_run_active) = true;
-        id(adaptive).set_announcement_offset(0);
+        id(announcement_boost_active) = false;
+    - script.execute: update_boost
     - mixer_speaker.apply_ducking:
         id: media_mixing_input
         decibel_reduction: 10 # dB quieter; 0 = full volume
@@ -1043,16 +1047,18 @@ voice_assistant:
               id(voice_assistant_phase) = ${voice_assist_reply_pending_phase_id};
           - script.execute: control_leds
   on_tts_start:
-    # TTS without a run = HA announcement (assist_satellite.announce): output
-    # offset until on_end, plus the urgent offset if set_announcement_offset
+    # TTS without a run = HA announcement (assist_satellite.announce): the
+    # announcement boost until on_end, plus urgent_boost_db if urgent_announcement
     # was called in the last 10 s.
     - lambda: |-
         if (!id(va_run_active)) {
-          float boost = ${announcement_offset_db};
-          if (id(urgent_pending) && millis() - id(urgent_set_ms) < 10000) boost += ${urgent_offset_db};
+          float boost = id(announcement_boost).state;
+          if (id(urgent_pending) && millis() - id(urgent_set_ms) < 10000) boost += ${urgent_boost_db};
           id(urgent_pending) = false;
-          id(adaptive).set_announcement_offset(boost);
+          id(announcement_boost_now) = boost;
+          id(announcement_boost_active) = true;
         }
+    - script.execute: update_boost
     - if:
         condition:
           # The intent_progress trigger didn't start the TTS response
@@ -1120,7 +1126,8 @@ voice_assistant:
               id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
               id(reply_pending) = false;
               id(va_run_active) = false;
-              id(adaptive).set_announcement_offset(0);  // announcement finished
+              id(announcement_boost_active) = false;  // announcement finished
+          - script.execute: update_boost
           - script.execute: control_leds
   on_timer_finished:
     - switch.turn_on: timer_ringing
@@ -1243,7 +1250,7 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: urgent_pending # set by the set_announcement_offset action
+  - id: urgent_pending # set by the urgent_announcement action
     type: bool
     restore_value: no
     initial_value: 'false'
@@ -1251,8 +1258,31 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: announcement_boost_active # an HA announcement is playing (from on_tts_start to on_end)
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: announcement_boost_now # its boost, dB (announcement boost + urgent)
+    type: float
+    restore_value: no
+    initial_value: '0'
 
 script:
+  # Output boost for what is playing: an HA announcement gets its boost; replies,
+  # chimes and timers none; music the music boost; nothing playing, none.
+  - id: update_boost
+    then:
+      - lambda: |-
+          float boost = 0.0f;
+          const auto st = id(external_media_player).state;
+          if (id(announcement_boost_active)) {
+            boost = id(announcement_boost_now);
+          } else if (id(va_run_active) || st == media_player::MEDIA_PLAYER_STATE_ANNOUNCING) {
+            boost = 0.0f;
+          } else if (st == media_player::MEDIA_PLAYER_STATE_PLAYING) {  // media pipeline: http media or Sendspin
+            boost = id(music_boost).state;
+          }
+          id(audio_stack).set_output_boost_db(boost);
   - id: night_mode_enter
     mode: queued
     then:
@@ -1832,14 +1862,14 @@ number:
       name: "Mic Gain (post-AFE trim)"
       entity_category: config
       disabled_by_default: true # tuning only
-      # 0..+18 dB: digital attenuation can't undo clipping in the analogue chain
+      # 0..+15 dB: digital attenuation can't undo clipping in the analogue chain
       # (lower es7210_gain_db instead). Digital gain raises speech and room noise
       # alike (same signal-to-noise ratio); its limit is clipping on loud close speech.
       # Default +15 dB: with es7210_gain_db 24, speech at arm's length to 2 m is about
       # -27 dBFS RMS; loud speech right into the device peaks just under full scale.
       # Only the first boot uses it; after that the value set in HA is restored.
       min_value: 0
-      max_value: 18
+      max_value: 15
       initial_value: 15
 
   - platform: template
@@ -1908,6 +1938,39 @@ number:
 #      - logger.log:
 #          format: "[VA] Set noise suppression to %.0f"
 #          args: ["x"]
+
+  # Output boosts over the media player volume (see the boost substitutions)
+  - platform: template
+    id: announcement_boost
+    name: "Announcement boost"
+    icon: mdi:bullhorn
+    entity_category: config
+    unit_of_measurement: dB
+    optimistic: true
+    restore_value: true
+    min_value: -6
+    max_value: 6
+    step: 3
+    initial_value: ${announcement_boost_db}
+    mode: slider
+    on_value:
+      - script.execute: update_boost
+
+  - platform: template
+    id: music_boost
+    name: "Music boost"
+    icon: mdi:music
+    entity_category: config
+    unit_of_measurement: dB
+    optimistic: true
+    restore_value: true
+    min_value: -6
+    max_value: 6
+    step: 3
+    initial_value: ${music_boost_db}
+    mode: slider
+    on_value:
+      - script.execute: update_boost
 
   - platform: template
     id: led_ring_brightness

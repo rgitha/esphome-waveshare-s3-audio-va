@@ -63,12 +63,21 @@ output looped back into the ES7210, −24 dB divider and a ~3 kHz low-pass on th
 board) and mic 1 are compared per frequency (cross-spectrum), so S does not
 depend on what is played or which TTS voice, and talking during a reply does not
 bias it (median of the last 5, stored in flash). C is how far above the room
-replies should be: the loudness constant (26 dB) plus the "Adaptive volume
-offset" (−6..+6), for sound assumed 46 dB below full scale at the reference
+replies should be: the loudness constant (29 dB) plus the "Adaptive volume
+trim" (−6..+6), for sound assumed 46 dB below full scale at the reference
 (typical speech). Room noise is measured on the AFE output before the Mic Gain
-trim. HA announcements get +6 dB over the adapted level (+6 more when urgent).
+trim. Switch "Adaptive volume reduction", sensor "Adaptive reduction level".
 Diagnostics: Speaker path gain (and per reply), Speaker level (last reply, the
 older method), Echo reduction, Room noise.
+
+**Boosts.** HA announcements and music play louder than replies by an
+"Announcement boost" and a "Music boost" (HA, −6..+6 dB in 3 dB steps, default
++6); the `urgent_announcement` action adds `urgent_boost_db` (6) to the next
+announcement. The boost is added in the audio stack's output gain after the
+mixer (stack fork, `set_output_boost_db()`): total = media player volume +
+adaptive reduction + boost, capped at 0 dBFS, so near full volume a boost has
+less effect. Independent of adaptive volume. Replies, chimes and timers get none.
+See [docs/audio-stack-forks.md](docs/audio-stack-forks.md).
 
 **Sendspin.** Synchronized multi-room audio as on Voice PE. The ES8311 output
 delay is unknown, so the Sendspin static delay is adjustable from the server.
