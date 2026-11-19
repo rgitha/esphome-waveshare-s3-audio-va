@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.20.1"
+  fw_version: "2026.11.20.2"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -59,7 +59,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 4845a5a283c05ec729cba8ec55619f15dd6bbda6
+  repo_ref: 0a43d3263eeb690e078af2ef11c174d92e120e23
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -938,6 +938,10 @@ doa_probe:
   log_interval: 2s
   level_threshold: -60
   task_core: 0
+  # starts 90 s after boot (allocations, task and taps), after the boot is marked good:
+  # a crash in the probe then cannot put the device into safe mode
+  start_delay: 90s
+  min_free_internal: 16000
   angle:
     name: DOA angle
 
