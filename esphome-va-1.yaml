@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.19.2"
+  fw_version: "2026.11.20.12"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -104,7 +104,7 @@ substitutions:
   # (docs/dual-wake-word.md). Change only for a deliberate test.
   afe_mode: low_cost            # AFE mode: low_cost / high_perf (only echo cancellation differs; high_perf ~15-20 points more CPU during playback, ~10 KB more internal RAM)
   afe_echo_filter_length: "4"   # echo filter length 2..4: no measurable CPU effect
-  afe_vad: "true"               # Espressif AFE VAD (feeds the Voice Detected sensor only; no CPU saving when off)
+  afe_vad: "false"              # Espressif AFE VAD: off (it fed only the Voice Detected sensor, now removed; unreliable here; no CPU saving either way)
   wake_word_raw0: "true"        # wake word instance on BSS stream raw 0
   wake_word_raw1: "true"        # wake word instance on BSS stream raw 1
   wake_word_output: "false"     # third instance on the unseparated output, for comparison only (with both above: model time exceeds the shared inference lock, overflows)
@@ -297,7 +297,7 @@ ota:
               const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
               // the strip's colour correction applies the ring brightness and gamma;
               // the dim level matches the pilot light
-              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_level} * 255 / 100, 0);
+              (*strip)[i] = k < lit ? Color(0, 70 * 255 / 100, 0) : Color(0, ${pilot_level} * 255 / 100, 0);  // filled: 70 %
             }
             strip->write_state(id(status_ring));  // id() is already the LightState pointer
     on_progress:
@@ -319,7 +319,7 @@ ota:
               const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
               // the strip's colour correction applies the ring brightness and gamma;
               // the dim level matches the pilot light
-              (*strip)[i] = k < lit ? Color(0, 255, 0) : Color(0, ${pilot_level} * 255 / 100, 0);
+              (*strip)[i] = k < lit ? Color(0, 70 * 255 / 100, 0) : Color(0, ${pilot_level} * 255 / 100, 0);  // filled: 70 %
             }
             strip->write_state(id(status_ring));  // id() is already the LightState pointer
     on_error:
@@ -701,7 +701,7 @@ esp_afe:
   aec_nlp_level: normal # only used by vc/fd types
   ns_enabled: false   # no effect with 2 mics (BSS takes precedence); off so 1-mic tests compare like for like
   vad_enabled: ${afe_vad}
-  continuous_vad: true
+  continuous_vad: ${afe_vad}
   agc_enabled: false
   memory_alloc_mode: more_psram
   task_core: 1
@@ -2444,13 +2444,6 @@ button:
 
 binary_sensor:
   # AFE voice activity (also the speech gate for direction of arrival later)
-  - platform: esp_afe
-    esp_afe_id: afe_processor
-    vad:
-      id: voice_presence
-      name: Voice Detected
-      disabled_by_default: true
-
   - platform: gpio
     name: "Key1"
     internal: true

@@ -2,6 +2,13 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.20
+
+- **.12** AFE VAD off and the "Voice Detected" sensor removed (it fed nothing else and
+  reacted only to long, loud speech; wake word and STT use micro_wake_word's VAD). OTA
+  progress: filled LEDs at 70 % (was 100 %). (.1-.11: DOA probe test builds, branch
+  doa-probe.)
+
 ## 2026.11.19
 
 - **.2** Dual wake word in production (branch dual-mww merged into main): one

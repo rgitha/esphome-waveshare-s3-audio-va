@@ -45,6 +45,11 @@ is a digital trim after the AFE, +15 dB by default: speech at arm's length to
 2 m reaches about -27 dBFS. The wake word and voice assistant gain factors stay
 at 1; the trim already sets the level for both.
 
+**Direction of arrival.** A test on branch `doa-probe` estimates the talker's
+direction from the two mics (about ±5° ahead, 10-15° to the sides); left there, as 7
+LEDs are too coarse to show it well. See
+[docs/doa-probe.md](https://github.com/rgitha/esphome-waveshare-s3-audio-va/blob/doa-probe/docs/doa-probe.md).
+
 **Wake words.** okay_nabu and hey_jarvis, plus "stop" (cutoff 0.75; 0.50
 false-triggered on residual TTS echo). One micro_wake_word instance on each
 separated stream (raw 0 on core 0, raw 1 on core 1, 500 ms audio buffer); with a
