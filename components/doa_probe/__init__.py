@@ -6,7 +6,7 @@ Needs the esp_afe mic tap (rgitha/esphome-audio-stack, branch doa).
 """
 
 import esphome.codegen as cg
-from esphome.components import sensor
+from esphome.components import micro_wake_word, sensor
 from esphome.components.esp_afe import CONF_ESP_AFE_ID, EspAfe
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
@@ -24,6 +24,9 @@ CONF_ANGLE = "angle"
 CONF_TASK_CORE = "task_core"
 CONF_START_DELAY = "start_delay"
 CONF_CHANGE_THRESHOLD = "change_threshold"
+CONF_REQUIRE_VAD = "require_vad"
+CONF_VAD_SOURCES = "vad_sources"
+CONF_DELAY_OFFSET = "delay_offset"
 CONF_MIN_FREE_INTERNAL = "min_free_internal"
 
 doa_probe_ns = cg.esphome_ns.namespace("doa_probe")
@@ -34,7 +37,12 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(DoaProbe),
         cv.GenerateID(CONF_ESP_AFE_ID): cv.use_id(EspAfe),
         # distance between the two microphones, metres
-        cv.Required(CONF_MIC_DISTANCE): cv.float_range(min=0.01, max=0.5),
+        # (effective) distance between the two microphones, metres: calibrated, so that
+        # sound from in line with the mics reads 0 / 180 deg
+        cv.Required(CONF_MIC_DISTANCE): cv.float_range(min=0.005, max=0.5),
+        # fixed extra delay of the left mic relative to the right (microseconds),
+        # calibration for a channel timing or phase mismatch (broadside reads 90 deg)
+        cv.Optional(CONF_DELAY_OFFSET, default=0.0): cv.float_range(min=-200.0, max=200.0),
         cv.Optional(CONF_RESOLUTION, default=10.0): cv.float_range(min=1.0, max=45.0),
         cv.Optional(CONF_FRAME_SAMPLES, default=1024): cv.one_of(256, 512, 1024, 2048, int=True),
         cv.Optional(CONF_LOG_INTERVAL, default="2s"): cv.positive_time_period_milliseconds,
@@ -43,6 +51,11 @@ CONFIG_SCHEMA = cv.Schema(
         # report (log line, sensor) only while the AFE VAD hears voice, and only when the
         # direction moved by at least this much (deg) since the last report
         cv.Optional(CONF_CHANGE_THRESHOLD, default=10.0): cv.float_range(min=0.0, max=180.0),
+        # use only frames during which a micro_wake_word VAD (vad_sources) reported voice
+        # (LEDs, log, sensor); false: every frame above level_threshold
+        cv.Optional(CONF_REQUIRE_VAD, default=True): cv.boolean,
+        # micro_wake_word instances whose VAD model decides "voice" (any of them)
+        cv.Optional(CONF_VAD_SOURCES, default=[]): cv.ensure_list(cv.use_id(micro_wake_word.MicroWakeWord)),
         # 0 deg = right mic's side (transport mic 0, slot 0); swap if the angle runs backwards
         cv.Optional(CONF_SWAP_MICS, default=False): cv.boolean,
         cv.Optional(CONF_TASK_CORE, default=0): cv.int_range(min=0, max=1),
@@ -67,11 +80,15 @@ async def to_code(config):
     afe = await cg.get_variable(config[CONF_ESP_AFE_ID])
     cg.add(var.set_afe(afe))
     cg.add(var.set_mic_distance(config[CONF_MIC_DISTANCE]))
+    cg.add(var.set_delay_offset_us(config[CONF_DELAY_OFFSET]))
     cg.add(var.set_resolution(config[CONF_RESOLUTION]))
     cg.add(var.set_frame_samples(config[CONF_FRAME_SAMPLES]))
     cg.add(var.set_log_interval(config[CONF_LOG_INTERVAL]))
     cg.add(var.set_level_threshold(config[CONF_LEVEL_THRESHOLD]))
     cg.add(var.set_change_threshold(config[CONF_CHANGE_THRESHOLD]))
+    cg.add(var.set_require_vad(config[CONF_REQUIRE_VAD]))
+    for src in config[CONF_VAD_SOURCES]:
+        cg.add(var.add_vad_source(await cg.get_variable(src)))
     cg.add(var.set_swap_mics(config[CONF_SWAP_MICS]))
     cg.add(var.set_task_core(config[CONF_TASK_CORE]))
     cg.add(var.set_start_delay(config[CONF_START_DELAY]))

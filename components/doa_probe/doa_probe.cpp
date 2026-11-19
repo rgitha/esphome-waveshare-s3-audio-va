@@ -55,7 +55,8 @@ void DoaProbe::start_() {
   const bool ok = this->srp_.init(this->frame_samples_, SAMPLE_RATE, this->mic_distance_, this->resolution_, BAND_LO_HZ,
                                   BAND_HI_HZ, [](size_t bytes) -> void * {
                                     return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                                  });
+                                  },
+                                  this->delay_offset_us_ * 1e-6f);
   ESP_LOGI(TAG, "SRP-PHAT init %s: bins %d..%d (%.0f-%.0f Hz), %d angles, internal RAM free %u", ok ? "ok" : "FAILED",
            this->srp_.k_lo(), this->srp_.k_hi(), BAND_LO_HZ, BAND_HI_HZ, this->srp_.num_angles(),
            (unsigned) free_internal());
@@ -83,14 +84,15 @@ void DoaProbe::start_() {
 void DoaProbe::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "DOA probe (SRP-PHAT, 0 deg = right mic side, 90 = broadside, 180 = left mic side):\n"
-                "  Mic distance: %.3f m\n"
+                "  Mic distance (effective): %.4f m\n"
+                "  Delay offset: %.1f us\n"
                 "  Resolution: %.0f deg\n"
                 "  Frame: %d samples (%d ms)\n"
                 "  Level threshold: %.0f dBFS\n"
                 "  Mics swapped: %s\n"
                 "  Task core: %d\n"
                 "  Starts %u s after boot",
-                this->mic_distance_, this->resolution_, this->frame_samples_,
+                this->mic_distance_, this->delay_offset_us_, this->resolution_, this->frame_samples_,
                 this->frame_samples_ * 1000 / SAMPLE_RATE, this->level_threshold_db_, YESNO(this->swap_mics_),
                 this->task_core_, (unsigned) (this->start_delay_ms_ / 1000));
 }
@@ -120,7 +122,7 @@ void DoaProbe::result_tap_cb_(const esp_afe::EspAfe::ResultTap &tap, void *ctx) 
   for (int c = 0; c < 3; c++)
     self->energy_[c] += e[c];
   self->energy_samples_ += tap.samples;
-  if (tap.vad_state == 1)  // VAD_SPEECH
+  if (tap.vad_state == 1)  // AFE VAD (not used for the decisions)
     self->vad_speech_frames_++;
   portEXIT_CRITICAL(&self->energy_lock_);
 }
@@ -152,7 +154,9 @@ void DoaProbe::task_(void *arg) {
     // near = right mic: 0 deg on the right mic's side, 180 deg on the left's
     const float angle = self->swap_mics_ ? self->srp_.process(left, right) : self->srp_.process(right, left);
     const uint32_t k = self->result_count_.load(std::memory_order_relaxed);
-    self->results_[k % RESULTS] = {millis(), angle, level};
+    const uint32_t t = millis();
+    const bool speech = t - self->last_speech_ms_.load(std::memory_order_relaxed) < 150;
+    self->results_[k % RESULTS] = {t, angle, level, speech};
     self->result_count_.store(k + 1, std::memory_order_release);
   }
 }
@@ -160,15 +164,17 @@ void DoaProbe::task_(void *arg) {
 void DoaProbe::summarize_(uint32_t since_ms, uint32_t now, const char *label, bool publish) {
   const uint32_t count = this->result_count_.load(std::memory_order_acquire);
   std::vector<float> loud;
-  int frames = 0;
+  int frames = 0, speech_frames = 0;
   float peak_level = -120.0f;
   for (uint32_t i = 0; i < (uint32_t) RESULTS && i < count; i++) {
     const Result &r = this->results_[(count - 1 - i) % RESULTS];
     if (now - r.ms > now - since_ms)
       break;
     frames++;
+    if (r.speech)
+      speech_frames++;
     peak_level = std::max(peak_level, r.level_db);
-    if (r.level_db >= this->level_threshold_db_)
+    if (r.level_db >= this->level_threshold_db_ && r.angle >= 0 && (r.speech || !this->require_vad_))
       loud.push_back(r.angle);
   }
   double e[3];
@@ -193,13 +199,13 @@ void DoaProbe::summarize_(uint32_t since_ms, uint32_t now, const char *label, bo
   const uint32_t dropped = this->dropped_bytes_.exchange(0, std::memory_order_relaxed);
   if (dropped)
     ESP_LOGW(TAG, "Mic audio dropped (%u bytes): the DOA task is behind", (unsigned) dropped);
-  if (loud.empty() || (publish && vad == 0)) {  // no voice
+  (void) vad;
+  if (loud.empty()) {  // no voice
     if (!publish) {
-      ESP_LOGD(TAG, "%s: no voice (peak %.0f dBFS)", label, peak_level);
-    } else if (!std::isnan(this->last_reported_)) {
-      this->last_reported_ = NAN;
-      if (this->angle_sensor_ != nullptr)
-        this->angle_sensor_->publish_state(NAN);
+      ESP_LOGD(TAG, "%s: no voice (peak %.0f dBFS, VAD speech in %d/%d frames)", label, peak_level, speech_frames,
+               frames);
+    } else {
+      this->last_reported_ = NAN;  // next voice reports again; the sensor keeps its last angle
     }
     return;
   }
@@ -211,9 +217,9 @@ void DoaProbe::summarize_(uint32_t since_ms, uint32_t now, const char *label, bo
       return;
     this->last_reported_ = median;
   }
-  ESP_LOGD(TAG, "%s: %.0f deg (median of %u/%d frames, 10-90%% %.0f..%.0f), peak %.0f dBFS | raw0 %.0f raw1 %.0f "
-                "raw2 %.0f dBFS%s",
-           label, median, (unsigned) m, frames, lo, hi, peak_level, db(e[0]), db(e[1]), db(e[2]), "");
+  ESP_LOGD(TAG, "%s: %.0f deg (median of %u voice frames, %d with VAD speech, of %d; 10-90%% %.0f..%.0f), peak %.0f "
+                "dBFS | raw0 %.0f raw1 %.0f raw2 %.0f dBFS",
+           label, median, (unsigned) m, speech_frames, frames, lo, hi, peak_level, db(e[0]), db(e[1]), db(e[2]));
   if (publish && this->angle_sensor_ != nullptr)
     this->angle_sensor_->publish_state(median);
 }
@@ -227,24 +233,33 @@ void DoaProbe::loop() {
   }
   if (this->state_ != State::RUNNING)
     return;
+#ifdef USE_MICRO_WAKE_WORD_VAD
+  for (auto *m : this->vad_sources_)  // micro_wake_word VAD models (atomic state)
+    if (m->get_vad_state()) {
+      this->last_speech_ms_.store(now, std::memory_order_relaxed);
+      break;
+    }
+#endif
   if (now - this->last_live_ms_ >= 100) {
     this->last_live_ms_ = now;
     const uint32_t count = this->result_count_.load(std::memory_order_acquire);
+    const bool speech_now =
+        !this->require_vad_ || now - this->last_speech_ms_.load(std::memory_order_relaxed) < 200;
     float a[RESULTS];
     int m = 0;
     for (uint32_t i = 0; i < (uint32_t) RESULTS && i < count; i++) {
       const Result &r = this->results_[(count - 1 - i) % RESULTS];
       if (now - r.ms > 500)
         break;
-      if (r.level_db >= this->level_threshold_db_ && r.angle >= 0)
+      if (r.level_db >= this->level_threshold_db_ && r.angle >= 0 && (r.speech || !this->require_vad_))
         a[m++] = r.angle;
     }
-    if (m == 0) {
-      this->live_angle_ = NAN;
-    } else {
+    if (!speech_now) {
+      this->live_angle_ = NAN;  // voice ended: blank at once
+    } else if (m > 0) {
       std::sort(a, a + m);
       this->live_angle_ = a[m / 2];
-    }
+    }  // else: speech but no qualifying frame yet: hold the last angle
   }
   if (now - this->last_log_ms_ < this->log_interval_ms_)
     return;
