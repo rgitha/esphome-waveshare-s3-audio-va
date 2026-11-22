@@ -2,6 +2,16 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.22
+
+- **.1** (TEST, branch usb-audio) USB audio: the board as a USB Audio Class device,
+  both directions (component usb_audio on Espressif usb_device_uac): PC -> board 48 kHz
+  stereo mixed to mono into a new mixer input (music boost while it plays); board -> PC
+  the AFE output as a 48 kHz mono microphone. Starts 10 s after boot only with 16 KB of
+  internal RAM free; logs the RAM it took. Serial logging off (the USB port is the audio
+  device). Log cleanup: wake word comparison lines, CPU per-task table and LED debug
+  lines removed (CPU load sensors kept).
+
 ## 2026.11.20
 
 - **.12** AFE VAD off and the "Voice Detected" sensor removed (it fed nothing else and

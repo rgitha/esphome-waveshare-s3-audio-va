@@ -1,0 +1,2484 @@
+# ==============================================================================
+# Home Assistant voice satellite for the Waveshare ESP32-S3-AUDIO-Board.
+# Based on github.com/sw3Dan/waveshare-s2-audio_esphome_voice.
+# Repository: github.com/rgitha/esphome-waveshare-s3-audio-va
+#
+# - Needs ESPHome 2026.10 or later and a secrets.yaml with wifi_ssid,
+#   wifi_password and api_key_esp32_audio_board.
+# - Tunables are at the top of substitutions; hardware and code constants
+#   at its end.
+# - How it works: README.md (Design notes). Version history: CHANGELOG.md.
+#   On every change: bump fw_version and add a CHANGELOG.md entry.
+# ==============================================================================
+
+substitutions:
+  device_name: esphome-va-1
+  friendly: "Voice Assistant 1 Test"
+  # Firmware version, shown in HA (device info) and the ESPHome dashboard.
+  # Bump on every change: year.month.day.build
+  fw_version: "2026.11.22.1"
+
+  # ---- Tunables -------------------------------------------------------------
+
+  # ---- Output levels (dB) ----
+  # Adaptive volume reduction: A = clamp(S - room noise - (C + trim), 0, max),
+  # S = speaker-to-mic path gain + analogue gain (measured, constant for the hardware)
+  loudness_constant_db: "29"  # C: reply this far above the room at full slider (assumes the speaker output 46 dB below full scale); the HA trim adds -6..+6
+  # Boosts over the media player volume (the reply level), applied by the audio stack
+  # after the mixer; the total is capped at 0 dBFS, so near full volume a boost has
+  # less effect. Independent of adaptive volume. Announcement and music boosts are HA
+  # settings (-6..+6 dB, 3 dB steps); these are their first-boot values. Chimes,
+  # replies and timers/alarms get no boost.
+  announcement_boost_db: "6"  # HA announcements (assist_satellite.announce, with the pre-announcement chime)
+  music_boost_db: "6"         # music (http media and Sendspin)
+  urgent_boost_db: "6"        # extra, for the next announcement after the urgent_announcement action
+  max_attenuation_db: "30"    # largest adaptive reduction
+  # Volume range (each used in two places, so they cannot drift apart)
+  master_volume_min_db: "-40" # codec master volume floor (audio stack and adaptive volume)
+  media_volume_min: "0.1"     # media player volume_min (media player and adaptive volume)
+
+  es7210_gain_db: "24.0" # mic ADC gain, fixed at boot; 3 dB steps. 24 + Mic Gain trim 15 = speech about -27 dBFS at arm's length
+  # Front-end mic mode (build time; changing it needs Clean Build Files):
+  #   "2" = both mics, echo cancellation + BSS (normal)
+  #   "1" = right mic only, echo cancellation, no BSS (for comparison tests)
+  afe_mic_num: "2"
+
+  # Audio from just before a wake-word start, sent to HA ahead of the live audio, so a
+  # command said straight after the wake word is not cut (patched voice_assistant in
+  # components/). 0ms = off. Too long and STT hears the end of the wake word.
+  wake_word_preroll: 150ms
+
+  # LED transitions (ms): crossfades and the fill from / empty into the pilot take this
+  # long; the thinking comet, and the moves into and out of it, go round in twice this.
+  led_transition_ms: '250'
+  pilot_level: '35' # pilot light level, % of the ring brightness
+
+  hidden_ssid: "false"
+
+  # ---- Files ----------------------------------------------------------------
+
+  # Files in this repository (sounds/, models/, components/), pinned to a commit.
+  # After changing one of them, push it and set repo_ref to that commit.
+  repo_ref: 69980c7fd0bb8be2f11c4fa9fe21a19e2b4773f6
+  repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
+  sounds_url: ${repo_url}/sounds
+  # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
+  mww_models_url: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2
+  boot_sound_file: ${sounds_url}/boot_chime.flac
+  mute_sound_file: ${sounds_url}/mute_chime.flac
+  unmute_sound_file: ${sounds_url}/unmute_chime.flac
+
+  # ---- Fixed (hardware and code) --------------------------------------------
+
+  i2s_mclk: GPIO12
+  i2s_bclk: GPIO13  # SCLK
+  i2s_lrclk: GPIO14 # LRCK/WS
+  i2s_din: GPIO15  # ES7210 -> ESP (mic in)
+  i2s_dout: GPIO16 # ESP -> ES8311 (speaker out)
+
+  amp_ctrl: 8 # TCA9555 pin driving the amplifier PA_EN
+  i2c_scl: GPIO10
+  i2c_sda: GPIO11
+  rtc_int: 5 # TCA9555 pin (RTC interrupt, unused)
+
+  # Mic spacing 35 mm centre to centre (needed later for direction of arrival)
+  afe_dual: ${ afe_mic_num == "2" or afe_mic_num == 2 }
+  afe_mic_slots: ${ [0, 2] if afe_dual else [0] }
+
+  led_num: '7' # WS2812 ring LEDs
+  # LED numbering: 0 is almost opposite the USB port; 1..6 follow anticlockwise (seen from the speaker side)
+  pilot_led: '0' # pilot light LED (0..6)
+
+  # Phases of the Voice Assistant
+  voice_assist_idle_phase_id: '1' # ready to be triggered by a wake word
+  voice_assist_waiting_for_command_phase_id: '2' # waiting for a voice command (after being triggered by the wake word)
+  voice_assist_listening_for_command_phase_id: '3' # listening for a voice command
+  voice_assist_thinking_phase_id: '4' # processing the command
+  voice_assist_replying_phase_id: '5' # replying to the command
+  voice_assist_reply_pending_phase_id: '6' # reply handed to TTS, audio not playing yet
+  voice_assist_not_ready_phase_id: '10' # not ready
+  voice_assist_error_phase_id: '11' # encountered an error
+
+  # ---- Test parameters: DO NOT TOUCH ------------------------------------------
+  # Fixed values of the former HA test controls of the dual wake word build
+  # (docs/dual-wake-word.md). Change only for a deliberate test.
+  afe_mode: low_cost            # AFE mode: low_cost / high_perf (only echo cancellation differs; high_perf ~15-20 points more CPU during playback, ~10 KB more internal RAM)
+  afe_echo_filter_length: "4"   # echo filter length 2..4: no measurable CPU effect
+  afe_vad: "false"              # Espressif AFE VAD: off (it fed only the Voice Detected sensor, now removed; unreliable here; no CPU saving either way)
+  wake_word_raw0: "true"        # wake word instance on BSS stream raw 0
+  wake_word_raw1: "true"        # wake word instance on BSS stream raw 1
+  wake_word_output: "false"     # third instance on the unseparated output, for comparison only (with both above: model time exceeds the shared inference lock, overflows)
+
+# Pre-configured camera code
+# exposes UI controls to Homeassistant
+# ====================================
+#packages: # REMOTE (GIT)
+#  waveshare_camera_pkg: github://sw3Dan/waveshare-s2-audio_esphome_voice/waveshare_camera_pkg.yaml@main
+#packages: # LOCAL FILE
+#  dynamic-cam: !include
+#    file: waveshare_camera_pkg.yaml
+
+esphome:
+  name: $device_name
+  friendly_name: $friendly
+  name_add_mac_suffix: false
+  project:
+    name: "rgitha.va-afe" # author.name, required format
+    version: $fw_version
+  comment: "AFE dual-mic, ${fw_version}"
+  min_version: 2026.10.0 # esphome-audio-stack requirement (also covers channel_colors)
+  on_boot:
+    - priority: 375
+      then:
+        - sensor.template.publish:
+            id: next_timer
+            state: -1
+        - script.execute: control_leds
+        - delay: 10min
+        - if:
+            condition:
+              lambda: return id(init_in_progress);
+            then:
+              - lambda: id(init_in_progress) = false;
+              - script.execute: control_leds
+    - priority: -100
+      then:
+        - lambda: |-
+            id(alarm_time).publish_state(id(saved_alarm_time));
+        - lambda: |-
+            auto call = id(alarm_action).make_call();
+            call.set_option(id(saved_alarm_action));
+            call.perform();
+
+esp32:
+  board: esp32-s3-devkitc-1
+  cpu_frequency: 240MHz
+  variant: esp32s3
+  flash_size: 16MB
+  toolchain: esp-idf
+  framework:
+    type: esp-idf
+    version: recommended
+    advanced:
+      compiler_optimization: PERF # AFE + wake word are CPU heavy
+    sdkconfig_options:
+      # FreeRTOS run-time statistics for the CPU load log and sensors (interval at the end)
+      CONFIG_FREERTOS_USE_TRACE_FACILITY: "y"
+      CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS: "y"
+      CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64: "y"
+      # Bounded Wi-Fi buffering (intercom board profile): media/TTS ingress sees
+      # backpressure before the audio sink saturates.
+      CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM: "10"
+      CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM: "32"
+      CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM: "32"
+      CONFIG_ESP_WIFI_TX_BA_WIN: "16"
+      CONFIG_ESP_WIFI_RX_BA_WIN: "16"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+
+      # Considerably speeds up mWW at the cost of using more PSRAM.
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
+
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"  # TLS1.3 support isn't enabled by default in IDF 5.1.5
+
+network:
+  # The speaker media player requests high-performance networking by default;
+  # on this full-duplex audio profile that causes bursty ingress and memory pressure.
+  enable_high_performance: false
+
+wifi:
+  id: wifi_id
+  fast_connect: ${hidden_ssid}
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none  # Disable power saving for better performance
+  reboot_timeout: 10min  # Prevent unnecessary reboots
+  on_connect:
+    - lambda: id(improv_ble_in_progress) = false;
+    - script.execute: control_leds
+  on_disconnect:
+    - script.execute: control_leds
+
+#network:
+#  enable_ipv6: true
+
+# Enable logging
+# Memory and health diagnostics (debug component), every 30 s
+debug:
+  update_interval: 30s
+
+logger:
+  # TEST (USB audio): the USB port is the audio device; no serial logging (logs over Wi-Fi)
+  baud_rate: 0
+
+api:
+  id: api_id
+  actions:
+    - action: set_led_color
+      variables:
+        red: float
+        green: float
+        blue: float
+      then:
+        - lambda: |-
+            id(led_ring_color_r) = std::min(1.0f, std::max(0.0f, red));
+            id(led_ring_color_g) = std::min(1.0f, std::max(0.0f, green));
+            id(led_ring_color_b) = std::min(1.0f, std::max(0.0f, blue));
+    - action: start_va
+      then:
+        # no wake word chose a stream -> STT gets the output (stream 2)
+        - lambda: id(va).select_stream(2);
+        - voice_assistant.start
+    - action: stop_va
+      then:
+        - voice_assistant.stop
+    - action: set_alarm_time
+      variables:
+        alarm_time_hh_mm: string
+      then:
+        - lambda: |-
+            if (alarm_time_hh_mm.length() == 5 &&
+              isdigit(alarm_time_hh_mm[0]) && isdigit(alarm_time_hh_mm[1]) &&
+              isdigit(alarm_time_hh_mm[3]) && isdigit(alarm_time_hh_mm[4])) {
+                id(alarm_time).publish_state(alarm_time_hh_mm);
+                id(saved_alarm_time) = alarm_time_hh_mm;
+              }
+    # Urgent announcement: call just before assist_satellite.announce; the
+    # next HA announcement within 10 s gets urgent_boost_db on top of the
+    # announcement boost.
+    - action: urgent_announcement
+      then:
+        - lambda: |-
+            id(urgent_pending) = true;
+            id(urgent_set_ms) = millis();
+  on_client_connected:
+    - script.execute: control_leds
+  on_client_disconnected:
+    - script.execute: control_leds
+
+  encryption:
+    key: !secret api_key_esp32_audio_board
+
+#http_request:
+#  verify_ssl: false
+#  buffer_size_rx: 2048  # Reduces CPU load when streaming audio
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+    encryption: # uses the api: encryption key
+    # LEDs show the update in green (used for nothing else). Audio stops first so
+    # its tasks don't compete with the transfer; the device reboots at the end.
+    on_begin:
+      then:
+        - micro_wake_word.stop:
+            id: mww
+        - micro_wake_word.stop:
+            id: mww_b
+        - micro_wake_word.stop:
+            id: mww_c
+        - voice_assistant.stop:
+        - media_player.stop:
+            id: external_media_player
+        - lambda: |-
+            id(ota_last_lit) = 0;
+            const float PCT = 0.0f;
+            // OTA: green, the only use of green. Dim green ring, bright green
+            // fill clockwise from the pilot LED (lit share = progress). The
+            // transfer blocks the main loop, so the strip is written directly.
+            auto *strip = static_cast<light::AddressableLight *>(id(status_ring).get_output());
+            const int n = ${led_num};
+            const int lit = static_cast<int>(PCT * n / 100.0f + 0.5f);
+            for (int k = 0; k < n; k++) {
+              const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
+              // the strip's colour correction applies the ring brightness and gamma;
+              // the dim level matches the pilot light
+              (*strip)[i] = k < lit ? Color(0, 70 * 255 / 100, 0) : Color(0, ${pilot_level} * 255 / 100, 0);  // filled: 70 %
+            }
+            strip->write_state(id(status_ring));  // id() is already the LightState pointer
+    on_progress:
+      then:
+        - lambda: |-
+            const float PCT = x;
+            // redraw only when the number of lit LEDs changes
+            const int now = static_cast<int>(PCT * ${led_num} / 100.0f + 0.5f);
+            if (now == id(ota_last_lit))
+              return;
+            id(ota_last_lit) = now;
+            // OTA: green, the only use of green. Dim green ring, bright green
+            // fill clockwise from the pilot LED (lit share = progress). The
+            // transfer blocks the main loop, so the strip is written directly.
+            auto *strip = static_cast<light::AddressableLight *>(id(status_ring).get_output());
+            const int n = ${led_num};
+            const int lit = static_cast<int>(PCT * n / 100.0f + 0.5f);
+            for (int k = 0; k < n; k++) {
+              const int i = (${pilot_led} - k + n) % n;  // clockwise from the pilot LED
+              // the strip's colour correction applies the ring brightness and gamma;
+              // the dim level matches the pilot light
+              (*strip)[i] = k < lit ? Color(0, 70 * 255 / 100, 0) : Color(0, ${pilot_level} * 255 / 100, 0);  // filled: 70 %
+            }
+            strip->write_state(id(status_ring));  // id() is already the LightState pointer
+    on_error:
+      then:
+        # problem: red (the device keeps running the old firmware)
+        - script.execute:
+            id: led_set_effect
+            effect: "Ring"
+            r: 1.0
+            g: 0.0
+            b: 0.0
+        - delay: 3s
+        # only the wake word instances enabled in the test parameters
+        - if:
+            condition:
+              lambda: return ${wake_word_raw0};
+            then:
+              - micro_wake_word.start:
+                  id: mww
+        - if:
+            condition:
+              lambda: return ${wake_word_raw1};
+            then:
+              - micro_wake_word.start:
+                  id: mww_b
+        - if:
+            condition:
+              lambda: return ${wake_word_output};
+            then:
+              - micro_wake_word.start:
+                  id: mww_c
+        - script.execute: control_leds
+
+i2c:
+  - id: internal_i2c
+    sda: $i2c_sda
+    scl: $i2c_scl
+    scan: true
+    frequency: 100kHz
+
+# I/O Expander that controls the amplifier enable pin
+tca9555:
+  id: ioexp
+  i2c_id: internal_i2c
+  address: 0x20
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+time:
+  - platform: homeassistant
+    id: rtc
+    # No timezone: here on purpose -> the device follows Home Assistant's time zone,
+    # which HA (2026.3+) sends with every time sync.
+    on_time:
+      - seconds: 0
+        minutes: /1
+        then:
+          - script.execute: check_alarm
+  # Alternative: on-board PCF85063 RTC (RTC_INT on TCA9555 pin $rtc_int)
+  #- platform: pcf85063
+  #  id: rtc
+  #  address: 0x51
+  #  i2c_id: internal_i2c
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_ring
+    pin: GPIO38
+    num_leds: ${led_num}
+    chipset: WS2812
+    channel_colors: RGB
+    default_transition_length: 150ms
+    effects:
+      # All LED states are drawn by this one effect, so the light never switches
+      # effects (an effect switch is either instant or fades from a wrong colour).
+      # led_set_effect sets the requested scene (led_scene) and colour; on a change the
+      # renderer moves from what is showing to the new scene:
+      #   idle -> steady ring (woken): fill clockwise from the pilot, colour changing on the way
+      #   pulse -> spin (thinking): the comet enters after the pilot and sweeps once round,
+      #     gathering the pulse; at the pilot it spins on
+      #   spin -> slow pulse (reply coming): the head sweeps on once round, filling everything
+      #   slow -> fast pulse (replying): same pulse, faster, phase kept
+      #   spin -> idle: the comet runs into the pilot, its tail shrinks into the head there
+      #   other -> idle: the ring empties clockwise into the pilot
+      #   anything else: crossfade
+      # Thinking is a comet: a full head and a tail over the rest of the ring, fading in
+      # linear light, on a dim ring. One timing, led_transition_ms: crossfades take it, the
+      # fill from and the empty into the pilot go once round in it, and the comet and the
+      # moves into and out of it go once round in twice it, so the comet never changes
+      # speed. Fills and the spin move clockwise (falling LED index). Colour
+      # blends are done in linear light (after the strip's gamma 2.8), so a fade does
+      # not dip darker halfway. Values here are before the ring brightness, which the
+      # light applies, with its gamma.
+      - addressable_lambda:
+          name: "Scene"
+          update_interval: 10ms
+          lambda: |-
+            constexpr int N = ${led_num}, P0 = ${pilot_led};
+            constexpr float GAMMA = 2.8f, TWO_PI = 6.2831853f;
+            constexpr int TAIL = N - 1;                                   // comet tail: the whole ring
+            const float D = ${led_transition_ms};
+            const float STEP = D / N, CSTEP = 2.0f * D / N;               // fills: a circle in D; comet: in 2 x D
+            const float PILOT = ${pilot_level} / 100.0f, BG = PILOT / 2;    // comet background: half the pilot level
+            enum { IDLE, RING, FLASH, BREATHE_SLOW, BREATHE_FAST, SPIN, TIMER, VOLUME };
+            enum { NONE, XFADE, FILL, GATHER, TO_PULSE, EMPTY, SPIN_TO_IDLE };
+            struct Col { float r, g, b; };
+
+            static Col frame[N], from[N];
+            static int scene = IDLE, choreo = NONE;
+            static Col col{1, 1, 1}, prev_col{1, 1, 1};
+            static uint32_t t0 = 0, live0 = 0;
+            static float phase = 0, spoke_pos = 0, dist = 0, end = 0;
+            static uint32_t timer_left = UINT32_MAX, timer_ms = 0;
+
+            auto clampf = [](float x, float a, float b) { return x < a ? a : (x > b ? b : x); };
+            auto smooth = [&](float x) { x = clampf(x, 0, 1); return x * x * (3 - 2 * x); };
+            auto lin = [&](float v) { return powf(clampf(v, 0, 1), GAMMA); };
+            auto unlin = [&](float l) { return powf(clampf(l, 0, 1), 1.0f / GAMMA); };
+            auto mix = [&](Col a, Col b, float t) {
+              return Col{unlin(lin(a.r) * (1 - t) + lin(b.r) * t), unlin(lin(a.g) * (1 - t) + lin(b.g) * t),
+                         unlin(lin(a.b) * (1 - t) + lin(b.b) * t)};
+            };
+            auto scale = [](Col c, float s) { return Col{c.r * s, c.g * s, c.b * s}; };
+            auto level = [](Col c) { return std::max(c.r, std::max(c.g, c.b)); };
+            auto hue = [&](Col c, Col fallback) { const float l = level(c); return l > 0.001f ? scale(c, 1 / l) : fallback; };
+            auto recolour = [&](Col c, Col to, float a) { return mix(c, scale(to, level(c)), a); };
+            auto cw = [](int s, int k) { return ((s - k) % N + N) % N; };  // k steps clockwise
+            auto ms_since = [](uint32_t now, uint32_t t) { return static_cast<float>(static_cast<int32_t>(now - t)); };
+
+            // ---- the live look of each scene (tau = ms since it began) ----
+            auto tail_l = [](int j, int len) {  // tail light behind the head, linear light
+              return (j >= 1 && j <= len) ? powf(1.0f - static_cast<float>(j) / (TAIL + 1), 2.2f) : 0.0f;
+            };
+            auto comet = [&](int head, Col c, float bg_scale, int len, Col *out) {
+              float l[N];
+              for (int i = 0; i < N; i++) l[i] = lin(BG) * bg_scale;
+              l[head] = 1;
+              for (int j = 1; j <= len; j++) { const int led = cw(head, -j); l[led] = std::max(l[led], tail_l(j, len)); }
+              for (int i = 0; i < N; i++) out[i] = scale(c, unlin(l[i]));
+            };
+            auto spin = [&](float tau, Col c, Col *out) {  // the comet, head jumping clockwise a step at a time
+              comet(cw(P0, static_cast<int>(floorf(tau / CSTEP))), c, 1, TAIL, out);
+            };
+            auto live = [&](int s, float tau, Col *out) {
+              for (int i = 0; i < N; i++) out[i] = Col{0, 0, 0};
+              switch (s) {
+                case IDLE: out[P0] = scale(col, PILOT); break;
+                case RING:
+                case FLASH: for (int i = 0; i < N; i++) out[i] = col; break;
+                case BREATHE_SLOW:
+                case BREATHE_FAST: {
+                  const float period = s == BREATHE_SLOW ? 2400.0f : 1200.0f;
+                  const float t = fmodf(tau + phase, period) / period;
+                  for (int i = 0; i < N; i++) out[i] = scale(col, 0.75f + 0.25f * cosf(TWO_PI * t));  // from the peak
+                  break;
+                }
+                case SPIN: spin(tau, col, out); break;
+                case TIMER: {  // countdown: share of lit LEDs = time left, whole LEDs, seconds interpolated
+                  const auto &tm = id(first_active_timer);
+                  if (tm.seconds_left != timer_left) { timer_left = tm.seconds_left; timer_ms = millis(); }
+                  const float total = std::max(tm.total_seconds, static_cast<uint32_t>(1));
+                  const float left = std::max(tm.seconds_left - std::min((millis() - timer_ms) / 1000.0f, 1.0f), 0.0f);
+                  const int lit = std::min(N, static_cast<int>(ceilf(N * left / total - 0.001f)));
+                  for (int i = 0; i < N; i++) out[i] = i < lit ? col : Col{0, 0, 0};
+                  if (id(mic_is_muted)) out[P0] = Col{PILOT, PILOT * 0.5f, 0};  // amber pilot: mic off
+                  break;
+                }
+                case VOLUME: {  // share of lit LEDs = media player volume
+                  const float v = id(external_media_player).volume;
+                  const int lit = v <= 0.0f ? 0 : std::max(1, static_cast<int>(lroundf(v * N)));
+                  for (int i = 0; i < N; i++) out[i] = i < lit ? col : Col{0, 0, 0};
+                  break;
+                }
+              }
+            };
+
+            // ---- a scene change: choose the transition, starting from what is showing ----
+            const uint32_t now = millis();
+            const int req = id(led_scene);
+            const Col req_col{id(led_ring_color_r), id(led_ring_color_g), id(led_ring_color_b)};
+            const bool col_changed = fabsf(req_col.r - col.r) + fabsf(req_col.g - col.g) + fabsf(req_col.b - col.b) > 0.01f;
+            if (initial_run) {
+              for (int i = 0; i < N; i++) from[i] = Col{0, 0, 0};
+              scene = req; col = req_col; t0 = live0 = now; phase = 0;
+              choreo = req == FLASH ? NONE : XFADE;
+            } else if (req != scene || col_changed) {
+              const int prev = scene;
+              const float prev_tau = ms_since(now, live0);
+              for (int i = 0; i < N; i++) from[i] = frame[i];
+              prev_col = col;
+              choreo = XFADE; t0 = live0 = now; phase = 0;
+              if (req == prev) {
+                choreo = XFADE;                                   // colour change only
+              } else if (req == FLASH) {
+                choreo = NONE;                                    // mute/unmute flash: at once
+              } else if (prev == IDLE && req == RING) {
+                choreo = FILL;
+              } else if (prev == BREATHE_FAST && req == SPIN) {
+                choreo = GATHER;
+              } else if (prev == SPIN && req == BREATHE_SLOW) {
+                choreo = TO_PULSE;
+                spoke_pos = floorf(prev_tau / CSTEP);             // where the head is
+              } else if (prev == BREATHE_SLOW && req == BREATHE_FAST) {
+                choreo = NONE;                                    // same pulse, faster, phase kept
+                phase = fmodf(prev_tau, 2400.0f) / 2400.0f * 1200.0f;
+              } else if (prev == SPIN && req == IDLE) {
+                choreo = SPIN_TO_IDLE;
+                spoke_pos = floorf(prev_tau / CSTEP);             // head: clockwise steps from the pilot
+                const int m = ((static_cast<int>(spoke_pos) % N) + N) % N;
+                dist = m == 0 ? 0 : N - m;                        // steps on to the pilot
+                end = (dist + TAIL) * CSTEP;                      // run in, then the tail shrinks into the head
+              } else if (req == IDLE) {
+                choreo = EMPTY;
+              }
+              scene = req; col = req_col;
+            }
+
+            // ---- draw ----
+            Col out[N];
+            const float t = ms_since(now, t0);
+            switch (choreo) {
+              case FILL: {  // fill clockwise from the pilot, one LED per step; colour on the way
+                const float tf = N * STEP, head = t / STEP;
+                const Col c = mix(hue(from[P0], col), col, smooth(t / tf));
+                for (int k = 0; k < N; k++) out[cw(P0, k)] = mix(from[cw(P0, k)], c, clampf(head - k, 0, 1));
+                if (t >= tf) { choreo = NONE; live0 = t0 + static_cast<uint32_t>(tf); }
+                break;
+              }
+              case GATHER: {  // the comet enters one step after the pilot and sweeps once round,
+                              // gathering the pulse; at the pilot it simply spins on
+                const float tg = (N - 1) * CSTEP, a = smooth(t / tg);
+                const int js = static_cast<int>(floorf(t / CSTEP));  // the head is LED js of the sweep
+                Col cf[N];
+                comet(cw(P0, js - (N - 1)), col, 1, TAIL, cf);
+                Col pulse_hue = prev_col;
+                for (int i = 0; i < N; i++) if (level(from[i]) > 0.001f) { pulse_hue = hue(from[i], prev_col); break; }
+                const Col head_col = mix(pulse_hue, col, a);
+                for (int j = 0; j < N; j++) {
+                  const int led = cw(P0, j - (N - 1));            // sweep order: P0+1 ... P0
+                  out[led] = j > js ? recolour(from[led], col, a) : j == js ? head_col : cf[led];
+                }
+                if (t >= tg) { choreo = NONE; live0 = t0 + static_cast<uint32_t>(tg); }
+                break;
+              }
+              case TO_PULSE: {  // the head sweeps on once round at the comet's speed, filling everything it passes
+                const float tf = (N - 1) * CSTEP;
+                const int h0 = cw(P0, static_cast<int>(spoke_pos)), moved = static_cast<int>(floorf(t / CSTEP));
+                comet(h0, col, 1, TAIL, out);
+                for (int j = 0; j <= std::min(moved, N - 1); j++) out[cw(h0, j)] = col;
+                if (t >= tf) { choreo = NONE; live0 = t0 + static_cast<uint32_t>(tf); }
+                break;
+              }
+              case EMPTY: {  // empty clockwise into the pilot, one LED per step; colour to the pilot's
+                const float te = (N - 1) * STEP, head = t / STEP, a = smooth(t / te);
+                for (int k = 0; k < N - 1; k++) {
+                  const int led = cw(P0, k + 1);
+                  out[led] = mix(recolour(from[led], col, a), Col{0, 0, 0}, clampf(head - k, 0, 1));
+                }
+                out[P0] = mix(from[P0], scale(col, PILOT), a);
+                if (t >= te) { choreo = NONE; live0 = t0 + static_cast<uint32_t>(te); }
+                break;
+              }
+              case SPIN_TO_IDLE: {  // the comet runs on into the pilot; the head stops there and the tail
+                                    // shrinks into it; the dim ring fades, the colour turns to the pilot's
+                if (t < end) {
+                  const float a = smooth(t / end), run_in = dist * CSTEP;
+                  const int moved = std::min(static_cast<int>(dist), static_cast<int>(floorf(t / CSTEP)));
+                  const int len = t < run_in ? TAIL : static_cast<int>(lroundf(TAIL * (1 - (t - run_in) / (TAIL * CSTEP))));
+                  comet(cw(P0, static_cast<int>(spoke_pos) + moved), mix(prev_col, col, a), 1 - a, len, out);
+                } else {
+                  for (int i = 0; i < N; i++) out[i] = Col{0, 0, 0};
+                  out[P0] = mix(col, scale(col, PILOT), smooth((t - end) / D));
+                  if (t - end >= D) { choreo = NONE; live0 = now; }
+                }
+                break;
+              }
+              case XFADE: {
+                Col target[N];
+                live(scene, t, target);
+                const float a = smooth(t / D);
+                for (int i = 0; i < N; i++) out[i] = mix(from[i], target[i], a);
+                if (t >= D) choreo = NONE;   // live0 = t0: the live scene carries on from here
+                break;
+              }
+              default: live(scene, ms_since(now, live0), out);
+            }
+
+            // ---- output: the light applies the ring brightness (current_color) and the gamma ----
+            const float b = std::max(current_color.r, std::max(current_color.g, current_color.b)) / 255.0f;
+            for (int i = 0; i < N; i++) {
+              frame[i] = out[i];
+              it[i] = Color(static_cast<uint8_t>(clampf(out[i].r * b, 0, 1) * 255.0f + 0.5f),
+                            static_cast<uint8_t>(clampf(out[i].g * b, 0, 1) * 255.0f + 0.5f),
+                            static_cast<uint8_t>(clampf(out[i].b * b, 0, 1) * 255.0f + 0.5f));
+            }
+      # Boot / initialisation
+      - addressable_rainbow:
+          name: "Rainbow Slow"
+          speed: 4
+          width: 7
+
+external_components:
+  # Fork of n-IA-hane/esphome-audio-stack: v2026.11.0 plus Espressif's GMF AI Audio
+  # 1.1.2 from the component registry (instead of the n-IA-hane/esp-gmf fork), the
+  # output boost (set_output_boost_db), and the AFE result tap with the esp_afe
+  # microphone platform (raw_data channels as microphones, for wake word on the BSS
+  # streams). Branch rgitha-prod, pinned by commit.
+  - source: github://rgitha/esphome-audio-stack@b92e0a5a29ee4d7f0d0b7d8b49514db6856e34e8
+    components: [esp_audio_stack, esp_afe]
+  # v0.4.4 (branch main), pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@8db7c7113402045ee140d9fba0e2fb5536d3434f
+    components: [adaptive_volume]
+  # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
+  # repository's components/ at repo_ref
+  # and micro_wake_word from ESPHome 2026.10.2, patched for several instances (wake
+  # word on each BSS stream), task_core pinning, ring_buffer_duration and diagnostics
+  - source: github://rgitha/esphome-waveshare-s3-audio-va@${repo_ref}
+    components: [voice_assistant, micro_wake_word, usb_audio]
+
+# Audio hardware: one shared I2S bus in 4-slot TDM at 48 kHz.
+# ES7210 slots: 0 = right mic, 2 = left mic, 1 = ES8311 playback reference, 3 = unused
+# (board oriented speaker down, GPIO header up). Mic audio goes through the AFE
+# and comes out as one processed 16 kHz mono stream.
+esp_audio_stack:
+  id: audio_stack
+  i2s_mclk_pin: $i2s_mclk
+  i2s_bclk_pin: $i2s_bclk
+  i2s_lrclk_pin: $i2s_lrclk
+  i2s_din_pin: $i2s_din
+  i2s_dout_pin: $i2s_dout
+  sample_rate: 48000
+  output_sample_rate: 16000
+  processor_id: afe_processor
+  # PSRAM buffers from the board-tested intercom profile. Audio task on core 0
+  # (with the wake word): core 1 carries the AFE feed task, and with both there
+  # the main loop got too few turns (~22 loops/s, gaps up to 0.25 s).
+  task_core: 0
+  task_priority: 19
+  task_stack_size: 8192
+  audio_task_stack_in_psram: true
+  buffers_in_psram: true
+  # Master volume = ES8311 hardware volume, used only by adaptive volume.
+  # -40 dB floor allows up to ~39 dB of adaptive reduction (was -30).
+  master_volume_min_db: ${master_volume_min_db}
+  audio_effects:
+    rate_cvt_complexity: 3
+    rate_cvt_perf_type: speed
+  codec:
+    i2c_id: internal_i2c
+    input:
+      type: es7210
+      address: 0x40
+      mic_selected: 0x0F
+      gain_db: $es7210_gain_db
+    output:
+      type: es8311
+      address: 0x18
+      use_mclk: true
+      no_dac_ref: true
+  use_tdm_reference: true
+  tdm_total_slots: 4
+  tdm_mic_slots: ${afe_mic_slots} # [0, 2] = right mic, left mic; [0] = right mic only
+  tdm_ref_slot: 1       # playback reference for echo cancellation
+
+# Espressif audio front end: echo cancellation + dual-mic BSS (+ VAD).
+# Notes from the intercom profile: AGC causes TTS/media stutter on this board;
+# AEC off with dual-mic BSS sounds metallic. NS is superseded by BSS on 2 mics.
+esp_afe:
+  id: afe_processor
+  type: sr            # speech recognition: linear AEC, keeps the spectrum intact for
+                      # wake word / STT. "fd" (intercom default) adds nonlinear
+                      # processing for two-way calls and lowered STT accuracy here.
+  mode: ${afe_mode}   # see the test parameters
+  mic_num: ${afe_mic_num}  # see the afe_mic_num substitution
+  se_enabled: ${afe_dual}  # dual-mic speech enhancement (BSS); BSS cannot be toggled at runtime
+  aec_filter_length: ${afe_echo_filter_length}
+  aec_nlp_level: normal # only used by vc/fd types
+  ns_enabled: false   # no effect with 2 mics (BSS takes precedence); off so 1-mic tests compare like for like
+  vad_enabled: ${afe_vad}
+  continuous_vad: ${afe_vad}
+  agc_enabled: false
+  memory_alloc_mode: more_psram
+  task_core: 1
+  task_priority: 5
+  ringbuf_size: 8
+  feed_task_core: 1   # feed (echo cancellation, BSS) on core 1: on core 0 with the
+                      # wake word it took core 0 to ~90 % and the wake word dropped audio
+  feed_task_priority: 5
+  feed_task_stack_size: 3072
+  fetch_task_core: 0  # must differ from feed_task_core
+  fetch_task_priority: 5
+  fetch_task_stack_size: 3072
+  feed_buf_in_psram: true
+  feed_ring_in_psram: true
+  fetch_ring_in_psram: true
+
+# Adaptive volume (component: github.com/rgitha/esphome-adaptive-volume).
+# In a quiet room all sound is turned down via the codec master volume; the HA
+# volume slider is the level in a loud room and never moves. The device
+# calibrates itself on its own spoken replies (speaker level S).
+# Attenuation A = clamp(S - room noise - (loudness_constant + trim), 0, max).
+adaptive_volume:
+  id: adaptive
+  esp_audio_stack_id: audio_stack
+  media_player: external_media_player
+  # The device makes no sound: the room may be measured
+  idle: |-
+    return id(voice_assistant_phase) == ${voice_assist_idle_phase_id} &&
+           id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_IDLE &&
+           !id(timer_ringing).state && !id(mic_is_muted);
+  # A spoken reply to a voice command is playing
+  reply: |-
+    return id(va_run_active) && id(voice_assistant_phase) == ${voice_assist_replying_phase_id} &&
+           id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+  # Output muted or amplifier off: a reply measured now is not counted
+  # Not counted: muted, amplifier off, or music playing under the reply (the mix
+  # with ducked music does not give a clean reply level)
+  blocked: |-
+    return id(external_media_player).is_muted() || id(mic_is_muted) || !id(amp_enable_8).state ||
+           id(http_media_source).get_state() == media_source::MediaSourceState::PLAYING ||
+           id(sendspin_media_source).get_state() == media_source::MediaSourceState::PLAYING;
+  speaker_level_nominal: -30   # (S_k diagnostic only in path mode)
+  # Path mode: S = path gain (speaker reference -> mic, cross-correlation) + the
+  # analogue gain (room noise follows the analogue gain, the path gain does not)
+  analog_gain: ${es7210_gain_db}
+  loudness_constant: ${loudness_constant_db}
+  max_attenuation: ${max_attenuation_db}
+  master_volume_min_db: ${master_volume_min_db}
+  media_volume_min: ${media_volume_min}
+  enable:
+    name: Adaptive volume reduction
+    entity_category: config
+  offset:
+    name: Adaptive volume trim
+    mode: slider
+  room_noise:
+    name: Room noise
+  # Path gain speaker -> mic: the median in use, and each reply's (diagnostics)
+  path_gain:
+    name: Speaker path gain
+    disabled_by_default: true
+  path_gain_reply:
+    name: Speaker path gain (last reply)
+    disabled_by_default: true
+  attenuation:
+    name: Adaptive reduction level
+  current_volume:
+    name: Current volume
+  # Diagnostic after each stretch of playback (1.5 s or longer)
+  echo_reduction:
+    name: Echo reduction
+
+microphone:
+  - platform: esp_audio_stack
+    id: afe_mic
+  # The two separated (BSS) streams as microphones, one wake
+  # word instance each. raw_data channel 2 is the unseparated stream afe_mic delivers.
+  # Mic Gain trim applied as on afe_mic; starting either keeps afe_mic (the pipeline) running.
+  - platform: esp_afe
+    id: afe_raw0
+    raw_channel: 0
+    pipeline_microphone: afe_mic
+  - platform: esp_afe
+    id: afe_raw1
+    raw_channel: 1
+    pipeline_microphone: afe_mic
+
+speaker:
+  - platform: esp_audio_stack
+    id: hw_speaker
+    sample_rate: 48000
+    bits_per_sample: 16
+    timeout: never
+    # Short hardware backlog so backpressure reaches media/TTS quickly (full duplex)
+    buffer_duration: 128ms
+
+  # Virtual speakers to combine the announcement and media streams together into one output
+  - platform: mixer
+    id: mixing_speaker
+    output_speaker: hw_speaker
+    num_channels: 1 # board has a single (mono) speaker
+    source_speakers:
+      - id: announcement_mixing_input
+        timeout: never
+      - id: media_mixing_input
+        timeout: never
+      # TEST (USB audio): PC playback (48 kHz mono after the down-mix)
+      - id: usb_mixing_input
+        timeout: never
+
+  # Virtual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: true  # frees internal RAM (largest free block fell to ~15 KB with music + replies)
+
+audio_file:
+  - id: mute_switch_on_sound
+    file: ${mute_sound_file}
+  - id: mute_switch_off_sound
+    file: ${unmute_sound_file}
+  - id: boot_sound
+    file: ${boot_sound_file}
+  - id: timer_finished_sound
+    file: ${sounds_url}/timer_finished.flac
+  - id: wake_word_triggered_sound
+    file: ${sounds_url}/wake_word_triggered.flac
+  - id: error_cloud_expired
+    file: ${sounds_url}/error_cloud_expired.mp3
+
+media_source:
+  - platform: audio_file
+    id: audio_file_announcement_source
+  - platform: audio_http
+    id: http_announcement_source
+    buffer_size: 250000
+  - platform: audio_http
+    id: http_media_source
+    buffer_size: 500000
+  - platform: sendspin
+    id: sendspin_media_source
+    codecs: [FLAC, PCM]  # Prefer FLAC for Sendspin
+    # DAC delay for sync: unknown for the ES8311 behind the audio stack (Voice PE: 480 us).
+    # Adjustable lets the Sendspin server (Music Assistant) set and keep a per-player delay.
+    static_delay_adjustable: true
+
+media_player:
+  # Sendspin group control (volume/mute of the whole group)
+  - platform: sendspin
+    id: sendspin_group_media_player
+  - platform: speaker_source
+    id: external_media_player
+    name: None
+    internal: False
+    volume_increment: 0.01
+    volume_initial: 0.85 # first boot only; afterwards the last volume is restored
+    volume_min: ${media_volume_min} # wider quiet end (was 0.4)
+    volume_max: 1.0 # audio-stack volume curve tops out at 0 dB (stock ES8311 driver reached about +6.5 dB at 0.8)
+    announcement_pipeline:
+      speaker: announcement_resampling_speaker
+      format: FLAC     # FLAC is the least processor intensive codec
+      num_channels: 1  # Stereo audio is unnecessary for announcements
+      sample_rate: 48000 # supported by Music Assistant
+      sources:
+        - audio_file_announcement_source
+        - http_announcement_source
+    media_pipeline:
+      speaker: media_resampling_speaker
+      format: FLAC     # FLAC is the least processor intensive codec
+      num_channels: 1  # mono hardware, one speaker
+      sample_rate: 48000
+      sources:
+        - http_media_source
+        - sendspin_media_source
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 10
+          duration: 0.0s
+      # The TTS reply has started playing: replying LEDs now
+      - if:
+          condition:
+            lambda: return id(reply_pending);
+          then:
+            - lambda: |-
+                id(reply_pending) = false;
+                id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+            - script.execute: control_leds
+    on_state:
+      - script.execute: update_boost
+      - if:
+          condition:
+            and:
+              - switch.is_off: timer_ringing
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing: external_media_player
+          then:
+            - mixer_speaker.apply_ducking:
+                id: media_mixing_input
+                decibel_reduction: 0
+                duration: 1.0s
+    on_mute:
+      - delay: 100ms  # Debounce
+      - script.execute: control_leds_volume_changed
+    on_unmute:
+      - delay: 100ms  # Debounce
+      - script.execute: control_leds_volume_changed
+    on_volume:
+      - if:
+          condition:
+            - lambda: return !id(init_in_progress);
+          then:
+            - delay: 100ms  # Debounce
+            - script.execute: control_leds_volume_changed
+
+# TEST (USB audio): the board as a USB Audio Class device, both directions.
+# PC -> board: 48 kHz stereo, mixed to mono, into the mixer (same output gain and
+# echo-cancellation reference as replies and music; music boost while it plays).
+# Board -> PC: the AFE output (echo-cancelled, 16 kHz), as a 48 kHz mono microphone.
+# Starts 10 s after boot, only with 16 KB of internal RAM free; logs the RAM it took.
+usb_audio:
+  id: usb
+  microphone: afe_mic
+  speaker: usb_mixing_input
+  product_name: "Voice Assistant 1"
+  start_delay: 10s
+  min_free_internal: 16000
+  task_core: 0
+  on_playback_start:
+    - script.execute: update_boost
+  on_playback_end:
+    - script.execute: update_boost
+
+micro_wake_word:
+  # One instance per separated (BSS) stream, each with all models, plus one on the
+  # unseparated output for comparison (started only if wake_word_output is true). mww
+  # follows Home Assistant's wake word choice; mww_b and mww_c copy mww's enabled
+  # wake words and cutoffs (interval below). Detections go to the on_wake script,
+  # which acts on the first.
+  - id: mww
+    task_core: 0 # pinned (raw 0 and output on core 0, raw 1 on core 1)
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
+    microphone:
+      id: mww_mic
+      microphone: afe_raw0 # separated stream raw 0
+      gain_factor: 1 # digital gain; use the Mic Gain trim instead
+    task_stack_in_psram: true
+    stop_after_detection: false
+    models:
+      - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+        id: okay_nabu
+      #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      #  id: kenobi
+      - model: ${mww_models_url}/hey_jarvis.json
+        id: hey_jarvis
+      #- model: hey_mycroft
+      #  id: hey_mycroft
+      - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
+        id: stop
+        internal: true
+        probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+    vad:
+      model: ${mww_models_url}/vad.json
+      probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
+    on_wake_word_detected:
+      - script.execute:
+          id: on_wake
+          wake_word: !lambda return wake_word;
+          stream: 0
+  - id: mww_b
+    task_core: 1 # pinned
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
+    microphone:
+      id: mww_b_mic
+      microphone: afe_raw1 # separated stream raw 1
+      gain_factor: 1 # digital gain; use the Mic Gain trim instead
+    task_stack_in_psram: true
+    stop_after_detection: false
+    models:
+      - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+        id: okay_nabu_b
+      #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      #  id: kenobi
+      - model: ${mww_models_url}/hey_jarvis.json
+        id: hey_jarvis_b
+      #- model: hey_mycroft
+      #  id: hey_mycroft
+      - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
+        id: stop_b
+        internal: true
+        probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+    vad:
+      model: ${mww_models_url}/vad.json
+      probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
+    on_wake_word_detected:
+      - script.execute:
+          id: on_wake
+          wake_word: !lambda return wake_word;
+          stream: 1
+
+  - id: mww_c # the unseparated output, for comparison only (wake_word_output)
+    task_core: 0 # pinned
+    # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
+    # bursts when playback starts (option in the local micro_wake_word copy; same name
+    # as esphome/esphome PR #20942)
+    ring_buffer_duration: 500ms
+    microphone:
+      id: mww_c_mic
+      microphone: afe_mic # unseparated output
+      gain_factor: 1 # digital gain; use the Mic Gain trim instead
+    task_stack_in_psram: true
+    stop_after_detection: false
+    models:
+      - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+        id: okay_nabu_c
+      #- model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      #  id: kenobi
+      - model: ${mww_models_url}/hey_jarvis.json
+        id: hey_jarvis_c
+      #- model: hey_mycroft
+      #  id: hey_mycroft
+      - model: ${repo_url}/models/stop.json # beta 20241017.5 (release "stop")
+        id: stop_c
+        internal: true
+        probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+    vad:
+      model: ${mww_models_url}/vad.json
+      probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
+    on_wake_word_detected:
+      - script.execute:
+          id: on_wake
+          wake_word: !lambda return wake_word;
+          stream: 2
+
+voice_assistant:
+  id: va
+  microphone:
+    microphone: afe_mic
+    id: va_mic
+    gain_factor: 1  # digital gain; use the Mic Gain trim instead. Live-adjustable from HA until reboot.
+    # Not applicable in this file: the AFE output is mono, so there is no channel
+    # to select. Kept from the single-mic baseline for reference:
+    #channels: 1 #Right
+    #channels: 0 #Left
+    # Using diff channel from mww so that some gain settings can apply properly?
+    # https://github.com/esphome/esphome/pull/8645 Apr 2025
+    # (That PR lets each consumer pick its own channel and gain_factor from one mic.)
+  # The separated streams as alternative STT sources (stream
+  # 0, 1; the microphone above is stream 2). on_wake selects the stream that fired,
+  # start_va the output; continued conversation keeps the last one.
+  stream_microphones:
+    - microphone: afe_raw0
+      id: va_stream0
+    - microphone: afe_raw1
+      id: va_stream1
+  media_player: external_media_player
+  micro_wake_word: mww
+  use_wake_word: false
+  # Home Assistant currently ignores these for ESPHome satellites (it always runs
+  # with noise suppression 0 / auto gain 0), so keep them at 0 to match reality.
+  noise_suppression_level: 0
+  auto_gain: 0dBFS
+  volume_multiplier: 1
+  wake_word_preroll: ${wake_word_preroll}
+  on_client_connected:
+    - if:
+        condition:
+          - lambda: return id(init_in_progress);
+          - switch.is_on: mic_mute_switch
+        then:
+          - switch.turn_off: mic_mute_switch
+    # Boot sound: once per boot, on the first connection to HA; not in night mode
+    - if:
+        condition:
+          and:
+            - lambda: return id(init_in_progress);
+            - switch.is_off: night_mode
+        then:
+          - script.execute:
+              id: play_sound
+              priority: false
+              sound_file: "boot_sound"
+    - lambda: id(init_in_progress) = false;
+    # only the wake word instances enabled in the test parameters
+    - if:
+        condition:
+          lambda: return ${wake_word_raw0};
+        then:
+          - micro_wake_word.start:
+              id: mww
+    - if:
+        condition:
+          lambda: return ${wake_word_raw1};
+        then:
+          - micro_wake_word.start:
+              id: mww_b
+    - if:
+        condition:
+          lambda: return ${wake_word_output};
+        then:
+          - micro_wake_word.start:
+              id: mww_c
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+  on_client_disconnected:
+    - voice_assistant.stop:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+    - script.execute: control_leds
+  on_error:
+    # Only set the error phase if the error code is different than duplicate_wake_up_detected or stt-no-text-recognized
+    # These two are ignored for a better user experience
+    - if:
+        condition:
+          and:
+            - lambda: return !id(init_in_progress);
+            - lambda: return code != "duplicate_wake_up_detected";
+            - lambda: return code != "stt-no-text-recognized";
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+          - script.execute: control_leds
+    # If the error code is cloud-auth-failed, serve a local audio file guiding the user.
+    - if:
+        condition:
+          - lambda: return code == "cloud-auth-failed";
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "error_cloud_expired"
+  # When the voice assistant starts: Play a wake up sound, duck audio.
+  on_start:
+    # A run (wake word, start_va, or a conversation continued after an
+    # announcement): its TTS reply gets no boost.
+    - lambda: |-
+        id(va_run_active) = true;
+        id(announcement_boost_active) = false;
+    - script.execute: update_boost
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 10 # dB quieter; 0 = full volume
+        duration: 0.0s         # The duration of the transition (default is no transition)
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_end:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: control_leds
+    # "Stop" from the end of the command until the reply has played
+    - script.execute: stop_word_for_reply
+  on_intent_progress:
+    - if:
+        condition:
+          # A nonempty x variable means a streaming TTS url was sent to the media player
+          lambda: 'return !x.empty();'
+        then:
+          # Steady red now; the wipe starts with the audio (media player on_announcement)
+          - lambda: |-
+              id(reply_pending) = true;
+              id(voice_assistant_phase) = ${voice_assist_reply_pending_phase_id};
+          - script.execute: control_leds
+  on_tts_start:
+    # TTS without a run = HA announcement (assist_satellite.announce): the
+    # announcement boost until on_end, plus urgent_boost_db if urgent_announcement
+    # was called in the last 10 s.
+    - lambda: |-
+        if (!id(va_run_active)) {
+          float boost = id(announcement_boost).state;
+          if (id(urgent_pending) && millis() - id(urgent_set_ms) < 10000) boost += ${urgent_boost_db};
+          id(urgent_pending) = false;
+          id(announcement_boost_now) = boost;
+          id(announcement_boost_active) = true;
+        }
+    - script.execute: update_boost
+    - if:
+        condition:
+          # The intent_progress trigger didn't start the TTS response
+          lambda: 'return !id(reply_pending) && id(voice_assistant_phase) != ${voice_assist_replying_phase_id};'
+        then:
+          # Steady red now; the wipe starts with the audio (media player on_announcement)
+          - lambda: |-
+              id(reply_pending) = true;
+              id(voice_assistant_phase) = ${voice_assist_reply_pending_phase_id};
+          - script.execute: control_leds
+          # HA announcement (no voice command before it): "stop" for it too
+          - if:
+              condition:
+                lambda: return !id(va_run_active);
+              then:
+                - script.execute: stop_word_for_reply
+  on_tts_end:
+    - script.execute:
+        id: send_tts_uri_event
+        tts_uri: !lambda 'return x;'
+  on_stt_end:
+    - script.execute:
+        id: send_stt_text_event
+        stt_text: !lambda 'return x;'
+
+  # When the voice assistant ends ...
+  on_end:
+    - wait_until:
+        not:
+          voice_assistant.is_running:
+    # The reply may still be pending or playing: ESPHome ends the run when
+    # playback has not started within 2 s, though it starts later. Wait for the
+    # real end of playback (not after an error): up to 30 s for the reply to
+    # start, then for as long as it plays (10 min safety limit).
+    - if:
+        condition:
+          lambda: return id(voice_assistant_phase) != ${voice_assist_error_phase_id};
+        then:
+          - wait_until:
+              condition:
+                lambda: return !id(reply_pending);
+              timeout: 30s
+          - wait_until:
+              condition:
+                lambda: return id(external_media_player).state != media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+              timeout: 10min
+    # Unless a new run started meanwhile (it owns the phase and LEDs):
+    # stop ducking and go back to idle
+    - if:
+        condition:
+          not:
+            voice_assistant.is_running:
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+          # If the end happened because of an error, let the error phase on for a second
+          - if:
+              condition:
+                lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+              then:
+                - delay: 1s
+          - lambda: |-
+              id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+              id(reply_pending) = false;
+              id(va_run_active) = false;
+              id(announcement_boost_active) = false;  // announcement finished
+          - script.execute: update_boost
+          - script.execute: control_leds
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - lambda: |
+        id(next_timer).publish_state(-1);
+        id(next_timer_name).publish_state("-");
+  on_timer_started:
+    - lambda: |
+        id(check_if_timers_active).execute();
+        if (id(is_timer_active)) {
+          id(fetch_first_active_timer).execute();
+          id(next_timer).publish_state(id(first_active_timer).seconds_left);
+          id(next_timer_name).publish_state(id(first_active_timer).name);
+        }
+    - script.execute: control_leds
+  on_timer_cancelled:
+    - lambda: |
+        id(check_if_timers_active).execute();
+        if (id(is_timer_active)) {
+          id(fetch_first_active_timer).execute();
+          id(next_timer).publish_state(id(first_active_timer).seconds_left);
+          id(next_timer_name).publish_state(id(first_active_timer).name);
+        } else {
+          id(next_timer).publish_state(-1);
+          id(next_timer_name).publish_state("-");
+        }
+    - script.execute: control_leds
+  on_timer_updated:
+    - lambda: |
+        id(check_if_timers_active).execute();
+        if (id(is_timer_active)) {
+          id(fetch_first_active_timer).execute();
+          id(next_timer).publish_state(id(first_active_timer).seconds_left);
+          id(next_timer_name).publish_state(id(first_active_timer).name);
+        }
+    - script.execute: control_leds
+  on_timer_tick:
+    - lambda: |
+        id(fetch_first_active_timer).execute();
+        int seconds_left = id(first_active_timer).seconds_left;
+        if (seconds_left % 5 == 0) {
+          id(next_timer).publish_state(seconds_left);
+        }
+        // LED updates are handled centrally by control_leds()
+
+globals:
+  # Dual wake word: time of the last acted-on detection; repeat flag
+  - id: last_wake_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: wake_repeat
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: led_scene  # requested LED scene (see the Scene effect)
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: led_scene_running  # the Scene effect is the light's effect
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: ota_last_lit
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: mic_is_muted
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
+  - id: led_ring_color_r
+    type: float
+    restore_value: yes
+    initial_value: '1.0'
+  - id: led_ring_color_g
+    type: float
+    restore_value: yes
+    initial_value: '0.0'
+  - id: led_ring_color_b
+    type: float
+    restore_value: yes
+    initial_value: '1.0'
+  - id: init_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: improv_ble_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: voice_assistant_phase
+    type: int
+    restore_value: no
+    initial_value: ${voice_assist_not_ready_phase_id}
+  - id: saved_alarm_time
+    type: std::string
+    restore_value: yes
+    initial_value: '"Unknown"'
+  - id: saved_alarm_action
+    type: std::string
+    restore_value: yes
+    initial_value: '"Play sound"'
+  - id: first_active_timer
+    type: voice_assistant::Timer
+    restore_value: no
+  - id: is_timer_active
+    type: bool
+    restore_value: no
+  - id: factory_reset_requested
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Night mode state; restored so a reboot during the night keeps the day values
+  - id: night_active
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: day_led_brightness
+    type: float
+    restore_value: yes
+    initial_value: '0.8'
+  - id: reply_pending # TTS reply announced by HA, audio not playing yet
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: va_run_active # a voice assistant run (wake word / start_va) is in progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: urgent_pending # set by the urgent_announcement action
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: urgent_set_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: announcement_boost_active # an HA announcement is playing (from on_tts_start to on_end)
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: announcement_boost_now # its boost, dB (announcement boost + urgent)
+    type: float
+    restore_value: no
+    initial_value: '0'
+
+script:
+  # Output boost for what is playing: an HA announcement gets its boost; replies,
+  # chimes and timers none; music the music boost; nothing playing, none.
+  - id: update_boost
+    then:
+      - lambda: |-
+          float boost = 0.0f;
+          const auto st = id(external_media_player).state;
+          if (id(announcement_boost_active)) {
+            boost = id(announcement_boost_now);
+          } else if (id(va_run_active) || st == media_player::MEDIA_PLAYER_STATE_ANNOUNCING) {
+            boost = 0.0f;
+          } else if (st == media_player::MEDIA_PLAYER_STATE_PLAYING ||  // media pipeline: http media or Sendspin
+                     id(usb).is_playing()) {                           // TEST (USB audio): PC playback
+            boost = id(music_boost).state;
+          }
+          id(audio_stack).set_output_boost_db(boost);
+  # Wake word detected on stream 0 (raw 0), 1 (raw 1) or 2 (output, comparison
+  # only). The first detection acts (the actions are the former
+  # on_wake_word_detected); one on another stream within 1.5 s is the same
+  # utterance and is only logged.
+  - id: on_wake
+    mode: parallel
+    max_runs: 4
+    parameters:
+      wake_word: string
+      stream: int
+    then:
+      - lambda: |-
+          static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
+          const char *name = (stream >= 0 && stream <= 2) ? NAMES[stream] : "?";
+          const uint32_t now = millis();
+          id(wake_repeat) = now - id(last_wake_ms) < 1500;
+          if (!id(wake_repeat)) {  // a repeat (the same word on the other stream) is ignored
+            ESP_LOGI("dual_mww", "Wake word '%s' on %s", wake_word.c_str(), name);
+            id(last_wake_ms) = now;
+          }
+      - if:
+          condition:
+            lambda: return !id(wake_repeat);
+          then:
+            # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing
+            - if:
+                condition:
+                  switch.is_off: mic_mute_switch
+                then:
+                  # If a timer is ringing: Stop it, do not start the voice assistant (We can stop timer from voice!)
+                  - if:
+                      condition:
+                        switch.is_on: timer_ringing
+                      then:
+                        - switch.turn_off: timer_ringing
+                      # Stop voice assistant if running
+                      else:
+                        - if:
+                            condition:
+                              voice_assistant.is_running:
+                            then:
+                              voice_assistant.stop:
+                            # Stop any other media player announcement, or a reply still on its way
+                            # (the run can end before its audio starts)
+                            else:
+                              - if:
+                                  condition:
+                                    or:
+                                      - media_player.is_announcing: external_media_player
+                                      - lambda: return id(reply_pending);
+                                  then:
+                                    - lambda: id(reply_pending) = false;
+                                    - media_player.stop:
+                                        id: external_media_player
+                                        announcement: true
+                                  # Start the voice assistant and play the wake sound, if enabled
+                                  else:
+                                    - if:
+                                        condition:
+                                          switch.is_on: wake_sound
+                                        then:
+                                          - script.execute:
+                                              id: play_sound
+                                              priority: true
+                                              sound_file: "wake_word_triggered_sound"
+                                          - delay: 300ms
+                                    # STT gets the stream that fired
+                                    - lambda: id(va).select_stream(stream);
+                                    - voice_assistant.start:
+                                        wake_word: !lambda return wake_word;
+  - id: night_mode_enter
+    mode: queued
+    then:
+      - if:
+          condition:
+            lambda: return !id(night_active); # already in night mode (e.g. restored at boot): keep saved day values
+          then:
+            - lambda: |-
+                id(day_led_brightness) = id(led_ring_brightness).state;
+                id(night_active) = true;
+                ESP_LOGI("night", "Night on: saved day brightness %.2f", id(day_led_brightness));
+            - if:
+                condition:
+                  lambda: return id(led_ring_brightness).state > id(night_led_brightness).state;
+                then:
+                  - number.set:
+                      id: led_ring_brightness
+                      value: !lambda return id(night_led_brightness).state;
+
+  - id: night_mode_exit
+    mode: queued
+    then:
+      - if:
+          condition:
+            lambda: return id(night_active);
+          then:
+            - lambda: |-
+                id(night_active) = false;
+                ESP_LOGI("night", "Night off: restoring day brightness %.2f", id(day_led_brightness));
+            - number.set:
+                id: led_ring_brightness
+                value: !lambda return id(day_led_brightness);
+
+  # Short flash of the ring: amber = microphone muted, white = unmuted
+  - id: flash_ring
+    parameters:
+      muted: bool
+    then:
+      # mute: amber, unmute: white, at once; then it empties into the pilot in the same colour
+      - script.execute:
+          id: led_set_effect
+          effect: "Flash"
+          r: 1.0
+          g: !lambda 'return muted ? 0.5f : 1.0f;'
+          b: !lambda 'return muted ? 0.0f : 1.0f;'
+      - delay: 250ms
+      - script.execute: control_leds # back to the pilot light (red while muted)
+
+  # LED dispatcher: maps a state name to a scene of the Scene effect (which moves
+  # between scenes itself), or to the boot rainbow, or off
+  - id: led_set_effect
+    mode: restart
+    parameters:
+      effect: std::string
+      r: float
+      g: float
+      b: float
+    then:
+      - lambda: |-
+          id(led_ring_color_r) = r;
+          id(led_ring_color_g) = g;
+          id(led_ring_color_b) = b;
+          // scene numbers as in the Scene effect
+          static const struct { const char *name; int scene; } MAP[] = {
+              {"Pilot", 0}, {"Ring", 1}, {"solid", 1}, {"Flash", 2}, {"Breathe 2.4s", 3},
+              {"Breathe 1.2s", 4}, {"Spin", 5}, {"Timer Tick", 6}, {"Volume Level", 7}};
+          int scene = -1;
+          for (const auto &m : MAP)
+            if (effect == m.name) scene = m.scene;
+          if (scene >= 0) id(led_scene) = scene;
+      - if:
+          condition:
+            lambda: 'return effect == "off";'
+          then:
+            - light.turn_off:
+                id: status_ring
+                transition_length: 0s
+            - lambda: id(led_scene_running) = false;
+          else:
+            - if:
+                condition:
+                  lambda: 'return effect == "Rainbow Slow";'
+                then:
+                  - light.turn_on:
+                      id: status_ring
+                      brightness: !lambda 'return id(led_ring_brightness).state;'
+                      red: !lambda 'return id(led_ring_color_r);'
+                      green: !lambda 'return id(led_ring_color_g);'
+                      blue: !lambda 'return id(led_ring_color_b);'
+                      effect: "Rainbow Slow"
+                  - lambda: id(led_scene_running) = false;
+                else:
+                  # the Scene effect picks up led_scene; start it only when it is not running
+                  - if:
+                      condition:
+                        lambda: return !id(led_scene_running);
+                      then:
+                        - light.turn_on:
+                            id: status_ring
+                            brightness: !lambda 'return id(led_ring_brightness).state;'
+                            red: 1.0  # white: the Scene effect sets the colours
+                            green: 1.0
+                            blue: 1.0
+                            effect: "Scene"
+                        - lambda: id(led_scene_running) = true;
+
+  # Single LED state machine (small footprint)
+  - id: control_leds
+    mode: single
+    then:
+      - lambda: |-
+          const bool wifi_connected = id(wifi_id).is_connected();
+          const bool api_connected  = id(api_id).is_connected();
+          const bool ringing        = id(timer_ringing).state;
+          const bool improv_ble     = id(improv_ble_in_progress);
+          const bool init_progress  = id(init_in_progress);
+          const int  phase          = id(voice_assistant_phase);
+
+          // Refresh timer cache sparsely when needed
+          id(check_if_timers_active).execute();
+          const bool timers_active = id(is_timer_active);
+
+          auto set = [&](const char* effect, float r, float g, float b) {
+            id(led_set_effect).execute(effect, r, g, b);
+          };
+
+          // Colours: blue/violet = mic streaming to HA; warm white = the device's
+          // turn; white = information (volume, timers, unmute); amber = mic off;
+          // red = a problem.
+          if (improv_ble) {                          // Provisioning
+            set("Breathe 2.4s", 1.0, 1.0, 1.0);      // white, slow pulse
+            return;
+          }
+          if (init_progress) {                       // Boot/init
+            if (wifi_connected) set("Rainbow Slow", 0.9, 0.1, 0.85); else set("Rainbow Slow", 1.0, 0.1, 0.1);
+            return;
+          }
+          if (!wifi_connected || !api_connected) {   // HA disconnected
+            set("solid", 1.0, 0.0, 0.0);             // steady red
+            return;
+          }
+          if (ringing) {                             // Timer ringing
+            set("Breathe 1.2s", 1.0, 1.0, 1.0);      // white pulse
+            return;
+          }
+
+          // Voice assistant phases
+          switch (phase) {
+            case ${voice_assist_waiting_for_command_phase_id}: // just woke
+              set("solid", 0.0, 0.0, 1.0);  // steady blue
+              return;
+            case ${voice_assist_listening_for_command_phase_id}:
+              set("Breathe 1.2s", 0.55, 0.0, 1.0);  // violet pulse: HA hears your voice
+              return;
+            case ${voice_assist_thinking_phase_id}:
+              set("Spin", 1.0, 0.70, 0.35);  // warm white (~3000 K), two spokes clockwise
+              return;
+            case ${voice_assist_reply_pending_phase_id}:
+              set("Breathe 2.4s", 1.0, 0.70, 0.35);  // warm white (~3000 K), slow pulse: reply coming
+              return;
+            case ${voice_assist_replying_phase_id}:
+              set("Breathe 1.2s", 1.0, 0.70, 0.35);  // warm white (~3000 K), faster pulse: speaking
+              return;
+            case ${voice_assist_error_phase_id}:
+              set("solid", 1.0, 0.0, 0.0);  // steady red
+              return;
+            case ${voice_assist_not_ready_phase_id}:
+              set("solid", 1.0, 0.0, 0.0);  // steady red
+              return;
+            default: break;
+          }
+
+          // Timers ticking: countdown of the first timer on the ring
+          if (timers_active) {
+            id(fetch_first_active_timer).execute();
+            set("Timer Tick", 1.0, 1.0, 1.0);  // white countdown
+            return;
+          }
+
+          // Idle: pilot LED, dim amber while the microphone is muted, else dim white
+          if (id(mic_is_muted)) set("Pilot", 1.0, 0.5, 0.0);
+          else set("Pilot", 1.0, 1.0, 1.0);
+
+  # Volume change: white, number of lit LEDs = volume level, for 1.2 s
+  - id: control_leds_volume_changed
+    mode: restart
+    then:
+      - script.execute:
+          id: led_set_effect
+          effect: "Volume Level"
+          r: 1.0
+          g: 1.0
+          b: 1.0
+      - delay: 1.2s
+      - script.execute: control_leds
+
+  # Timer sound handling
+  - id: ring_timer
+    then:
+      - script.execute: enable_repeat_one
+      - script.execute:
+          id: play_sound
+          priority: true
+          sound_file: "timer_finished_sound"
+
+  - id: enable_repeat_one
+    then:
+      - media_player.repeat_one:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 500ms
+
+  - id: disable_repeat
+    then:
+      - media_player.repeat_off:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 0ms
+
+  - id: play_sound
+    parameters:
+      priority: bool
+      sound_file: string  # id of an audio_file entry
+    then:
+      - lambda: |-
+          if (priority) {
+            id(external_media_player)
+              ->make_call()
+              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_STOP)
+              .set_announcement(true)
+              .perform();
+          }
+          if ((id(external_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING) || priority) {
+            id(external_media_player)
+              ->make_call()
+              .set_media_url("audio-file://" + sound_file)
+              .set_announcement(true)
+              .perform();
+          }
+
+  # Timer helpers
+  - id: fetch_first_active_timer
+    mode: single
+    then:
+      - lambda: |
+          static uint32_t last_fetch_time = 0;
+          uint32_t now = millis();
+          if (now - last_fetch_time < 500) return;
+          last_fetch_time = now;
+
+          const auto &timers = id(va).get_timers();
+          if (timers.empty()) return;
+
+          auto output_timer = *timers.begin();
+          for (const auto &timer : timers) {
+            if (timer.is_active && timer.seconds_left <= output_timer.seconds_left) {
+              output_timer = timer;
+
+              }
+          }
+          id(first_active_timer) = output_timer;
+
+  - id: check_if_timers_active
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          bool output = false;
+          if (!timers.empty()) {
+            for (const auto &timer : timers) {
+              if (timer.is_active) {
+                output = true;
+                break;
+              }
+            }
+          }
+          id(is_timer_active) = output;
+
+  # Enable/disable the "stop" wake word around long TTS
+  # "Stop" for a reply: on at the end of the command (a "stop" ending the
+  # command is not caught: the freshly enabled model has no history), off once the reply has played, the run
+  # ended without one, or a follow-up command is being listened to. Restarted
+  # by each command and each HA announcement.
+  - id: stop_word_for_reply
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const int p = id(voice_assistant_phase);
+              return p == ${voice_assist_thinking_phase_id} || p == ${voice_assist_reply_pending_phase_id} ||
+                     p == ${voice_assist_replying_phase_id};
+          then:
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.enable_model: stop
+                  - micro_wake_word.enable_model: stop_b
+                  - micro_wake_word.enable_model: stop_c
+            - wait_until:
+                condition:
+                  lambda: |-
+                    const int p = id(voice_assistant_phase);
+                    return p != ${voice_assist_thinking_phase_id} && p != ${voice_assist_reply_pending_phase_id} &&
+                           p != ${voice_assist_replying_phase_id};
+                timeout: 10min  # the phase follows the real end of the reply (on_end)
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.disable_model: stop
+                  - micro_wake_word.disable_model: stop_b
+                  - micro_wake_word.disable_model: stop_c
+
+  # Alarm handling
+  - id: check_alarm
+    then:
+      - lambda: |-
+          if (id(alarm_on).state && id(alarm_time).has_state()) {
+            auto set_alarm_time = id(alarm_time).state;
+            if (set_alarm_time.length() == 5 &&
+                isdigit(set_alarm_time[0]) && isdigit(set_alarm_time[1]) &&
+                isdigit(set_alarm_time[3]) && isdigit(set_alarm_time[4])) {
+              auto alarm_hour = std::stoi(set_alarm_time.substr(0, 2));
+              auto alarm_minute = std::stoi(set_alarm_time.substr(3, 2));
+
+              auto time_now = id(rtc).now();
+              if (time_now.hour == alarm_hour && time_now.minute == alarm_minute) {
+                auto action = id(alarm_action).current_option();
+                if (action == "Play sound") {
+                  id(timer_ringing).turn_on();
+                } else if (action == "Send event") {
+                  id(send_alarm_event).execute();
+                } else if (action == "Sound and event") {
+                  id(timer_ringing).turn_on();
+                  id(send_alarm_event).execute();
+                }
+              }
+            } else {
+              ESP_LOGW("alarm", "Incorrect alarm time setting");
+            }
+          }
+
+  - id: send_alarm_event
+    then:
+      - homeassistant.event:
+          event: esphome.alarm_ringing
+
+  - id: send_tts_uri_event
+    parameters:
+      tts_uri: string
+    then:
+      - homeassistant.event:
+          event: esphome.tts_uri
+          data:
+            uri: !lambda return tts_uri;
+
+  - id: send_stt_text_event
+    parameters:
+      stt_text: string
+    then:
+      - homeassistant.event:
+          event: esphome.stt_text
+          data:
+            text: !lambda return stt_text;
+
+select:
+  - platform: template
+    name: "Wake word sensitivity"
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      # Sets specific wake word probabilities computed for each particular model
+      # Note probability cutoffs are set as a quantized uint8 value, each comment has the corresponding floating point cutoff
+      # False Accepts per Hour values are tested against all units and channels from the Dinner Party Corpus.
+      # These cutoffs apply only to the specific models included in the firmware: okay_nabu@20241226.3, hey_jarvis@v2, hey_mycroft@v2
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);    // 0.85 -> 0.000 FAPH on DipCo (Manifest's default)
+          //id(hey_jarvis).set_probability_cutoff(247);   // 0.97 -> 0.563 FAPH on DipCo (Manifest's default)
+          id(hey_jarvis).set_probability_cutoff(247);
+          //id(hey_mycroft).set_probability_cutoff(253);  // 0.99 -> 0.567 FAPH on DipCo
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);    // 0.69 -> 0.376 FAPH on DipCo
+          //id(hey_jarvis).set_probability_cutoff(235);   // 0.92 -> 0.939 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(200);
+          //id(hey_mycroft).set_probability_cutoff(242);  // 0.95 -> 1.502 FAPH on DipCo (Manifest's default)
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(50);
+          //id(okay_nabu).set_probability_cutoff(143);    // 0.56 -> 0.751 FAPH on DipCo
+          //id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(100);
+          //id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
+        }
+  - platform: logger
+    id: logger_select
+    name: Logger Level
+    disabled_by_default: true
+  - platform: template
+    optimistic: true
+    name: "Alarm action"
+    id: alarm_action
+    entity_category: config
+    icon: mdi:bell-plus
+    options:
+      - "Play sound"
+      - "Send event"
+      - "Sound and event"
+    initial_option: "Play sound"
+    on_value:
+      then:
+        - lambda: |-
+            id(saved_alarm_action) = x;
+
+switch:
+  # Echo cancellation on/off for A/B testing (keep on for normal use). The
+  # speaker level calibration needs it on; while off, calibration pauses.
+  - platform: esp_afe
+    esp_afe_id: afe_processor
+    aec:
+      id: aec_switch
+      name: Echo Cancellation
+      icon: mdi:ear-hearing
+      restore_mode: RESTORE_DEFAULT_ON
+      entity_category: config
+
+  - platform: gpio
+    id: amp_enable_8
+    name: Amplifier
+    icon: mdi:speaker
+    entity_category: config
+    disabled_by_default: true # off just silences the device
+    pin:
+      tca9555: ioexp
+      number: $amp_ctrl
+      inverted: false
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    id: mic_mute_switch
+    name: "Microphone Mute"
+    icon: mdi:microphone-off
+    restore_mode: RESTORE_DEFAULT_OFF
+    lambda: |-
+      return id(mic_is_muted);
+    # Real mute: every consumer (wake word, VA) receives silence.
+    # (0 dB ES7210 gain is unity gain, not silence.)
+    turn_on_action:
+      - lambda: id(mic_is_muted) = true;
+      - microphone.mute: afe_mic
+      - microphone.mute: afe_raw0
+      - microphone.mute: afe_raw1
+      - script.execute:
+          id: flash_ring
+          muted: true
+      - if:
+          condition:
+            and:
+              - switch.is_on: mute_sound
+              - lambda: return !id(init_in_progress); # no sound for the automatic unmute at boot
+          then:
+            - script.execute:
+                id: play_sound
+                priority: false
+                sound_file: "mute_switch_on_sound"
+    turn_off_action:
+      - lambda: id(mic_is_muted) = false;
+      - microphone.unmute: afe_mic
+      - microphone.unmute: afe_raw0
+      - microphone.unmute: afe_raw1
+      - script.execute:
+          id: flash_ring
+          muted: false
+      - if:
+          condition:
+            and:
+              - switch.is_on: mute_sound
+              - lambda: return !id(init_in_progress);
+          then:
+            - script.execute:
+                id: play_sound
+                priority: false
+                sound_file: "mute_switch_off_sound"
+
+  - platform: template
+    id: mute_sound
+    name: Mute-unmute sound
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    id: wake_sound
+    name: Wake sound
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  # Night mode (LEDs only; adaptive volume handles quiet nights):
+  # "Night LED Ring Brightness" acts as a cap. On: remember the day brightness,
+  # lower it only if above the cap. During: changes apply live but are not
+  # kept. Off: restore the day brightness.
+  - platform: template
+    id: night_mode
+    name: Night mode
+    icon: "mdi:weather-night"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - script.execute: night_mode_enter
+    turn_off_action:
+      - script.execute: night_mode_exit
+
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      - micro_wake_word.disable_model: stop
+      - micro_wake_word.disable_model: stop_b
+      - micro_wake_word.disable_model: stop_c
+      - script.execute: disable_repeat
+      - if:
+          condition:
+            media_player.is_announcing: external_media_player
+          then:
+            media_player.stop:
+              id: external_media_player
+              announcement: true
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
+      - script.execute: control_leds
+    on_turn_on:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 10
+          duration: 0.0s
+      - micro_wake_word.enable_model: stop
+      - micro_wake_word.enable_model: stop_b
+      - micro_wake_word.enable_model: stop_c
+      - script.execute: ring_timer
+      - script.execute: control_leds
+      - delay: 2min
+      - switch.turn_off: timer_ringing
+
+  - platform: template
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    id: alarm_on
+    icon: mdi:bell-badge
+    name: "Alarm on"
+    on_turn_on:
+      - script.execute: control_leds
+    on_turn_off:
+      - script.execute: control_leds
+
+number:
+  # Digital level trim applied after the AFE (0 dB = unity, saved across reboots).
+  # The ES7210 analogue gain is fixed by the es7210_gain_db substitution.
+  - platform: esp_audio_stack
+    mic_gain:
+      id: mic_gain
+      name: "Mic Gain (post-AFE trim)"
+      entity_category: config
+      disabled_by_default: true # tuning only
+      # 0..+15 dB: digital attenuation can't undo clipping in the analogue chain
+      # (lower es7210_gain_db instead). Digital gain raises speech and room noise
+      # alike (same signal-to-noise ratio); its limit is clipping on loud close speech.
+      # Default +15 dB: with es7210_gain_db 24, speech at arm's length to 2 m is about
+      # -27 dBFS RMS; loud speech right into the device peaks just under full scale.
+      # Only the first boot uses it; after that the value set in HA is restored.
+      min_value: 0
+      max_value: 15
+      initial_value: 15
+
+  - platform: template
+    id: va_gain_factor0
+    name: "Gain Factor Ch0"
+    entity_category: config
+    disabled_by_default: true # tuning only
+    min_value: 1
+    max_value: 64
+    step: 1
+    restore_value: false # every boot starts at the YAML value (1); HA changes last until reboot
+    initial_value: 1
+    set_action:
+      - lambda: |-
+          id(mww_mic).set_gain_factor(x);   // adjust gain factor on the fly
+      - logger.log:
+          format: "[MWW MIC] Set gain factor to %.0f"
+          args: ["x"]
+
+  - platform: template
+    id: va_gain_factor1
+    name: "Gain Factor Ch1"
+    entity_category: config
+    disabled_by_default: true # tuning only
+    min_value: 1
+    max_value: 64
+    step: 1
+    restore_value: false # every boot starts at the YAML value (1); HA changes last until reboot
+    initial_value: 1
+    set_action:
+      - lambda: |-
+          id(va_mic).set_gain_factor(x);   // adjust gain factor on the fly
+      - logger.log:
+          format: "[VA MIC] Set gain factor to %.0f"
+          args: ["x"]
+
+  # Disabled: Home Assistant ignores auto gain / noise suppression sent by ESPHome satellites.
+#  - platform: template
+#    id: va_auto_gain
+#    name: "VA Auto Gain"
+#    entity_category: config
+#    min_value: 1
+#    max_value: 31
+#    step: 1
+#    restore_value: true
+#    initial_value: 16
+#    set_action:
+#      - lambda: |-
+#          id(va).set_auto_gain(x);   // adjust auto gain on the fly
+#      - logger.log:
+#          format: "[VA] Set auto gain to %.0f"
+#          args: ["x"]
+
+#  - platform: template
+#    id: va_noise_suppression
+#    name: "Noise Suppression"
+#    entity_category: config
+#    min_value: 0
+#    max_value: 4
+#    step: 1
+#    restore_value: true
+#    initial_value: 4
+#    set_action:
+#      - lambda: |-
+#          id(va).set_noise_suppression_level(x);   // adjust noise suppression on the fly
+#      - logger.log:
+#          format: "[VA] Set noise suppression to %.0f"
+#          args: ["x"]
+
+  # Output boosts over the media player volume (see the boost substitutions)
+  - platform: template
+    id: announcement_boost
+    name: "Announcement boost"
+    icon: mdi:bullhorn
+    entity_category: config
+    unit_of_measurement: dB
+    optimistic: true
+    restore_value: true
+    min_value: -6
+    max_value: 6
+    step: 3
+    initial_value: ${announcement_boost_db}
+    mode: slider
+    on_value:
+      - script.execute: update_boost
+
+  - platform: template
+    id: music_boost
+    name: "Music boost"
+    icon: mdi:music
+    entity_category: config
+    unit_of_measurement: dB
+    optimistic: true
+    restore_value: true
+    min_value: -6
+    max_value: 6
+    step: 3
+    initial_value: ${music_boost_db}
+    mode: slider
+    on_value:
+      - script.execute: update_boost
+
+  - platform: template
+    id: led_ring_brightness
+    name: "LED Ring Brightness"
+    icon: mdi:brightness-6
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    min_value: 0.2
+    max_value: 1.0
+    step: 0.05
+    initial_value: 0.8
+    mode: slider
+    on_value:
+      - if:
+          condition:
+            light.is_on: status_ring
+          then:
+            - light.turn_on:
+                id: status_ring
+                brightness: !lambda 'return x;'
+
+  - platform: template
+    id: night_led_brightness
+    name: "Night LED Ring Brightness"
+    icon: mdi:brightness-4
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    min_value: 0.2
+    max_value: 1.0
+    step: 0.05
+    initial_value: 0.4
+    mode: slider
+
+sensor:
+  # CPU load per core over the last 60 s (interval at the end)
+  - platform: template
+    id: cpu_load_core0
+    name: CPU load core 0
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
+  - platform: template
+    id: cpu_load_core1
+    name: CPU load core 1
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
+
+  # Memory, loop time and temperature diagnostics: off by default (enable in HA when needed)
+  - platform: debug
+    free:
+      name: "Heap free"
+      entity_category: diagnostic
+      disabled_by_default: true
+    block:
+      name: "Heap max block"
+      entity_category: diagnostic
+      disabled_by_default: true
+    psram:
+      name: "PSRAM free"
+      entity_category: diagnostic
+      disabled_by_default: true
+    loop_time:
+      name: "Loop time"
+      entity_category: diagnostic
+      disabled_by_default: true
+  - platform: internal_temperature
+    name: "ESP temperature"
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: 60s
+  # Battery voltage. Requires the hardware mod: 0R bridge on R78 pad 1 (BAT_ADC)
+  # to pad 3 (GPIO6). Divider R2 200k / R11 100k -> pin sees 1/3 of the battery.
+  # GPIO6 is ADC1 (works with Wi-Fi); it is also LCD_SDA3 (QSPI LCD only) and
+  # P1 header pin 15, so leave both unused.
+  - platform: adc
+    pin: GPIO6
+    id: battery_adc
+    internal: true
+    attenuation: 12db
+    update_interval: 30s
+    filters:
+      - multiply: 3.0 # divider ratio; fine-tune against a multimeter
+    # Read every 30 s; report the median of the last 10 readings every 5 min
+    # (ignores ADC noise and voltage dips while the speaker or Wi-Fi draw current).
+    # Below 2.5 V the battery is disconnected (slide switch off / unplugged):
+    # report "unknown" at once and restart the median, so a reconnected battery
+    # is reported on its first reading.
+    on_value:
+      - lambda: |-
+          enum { WINDOW = 10 };
+          static float buf[WINDOW];
+          static int count = 0, since_report = 0;
+          static bool absent = false;
+          if (x < 2.5f) {
+            if (!absent) {
+              absent = true;
+              id(battery_voltage).publish_state(NAN);
+              id(battery_level).publish_state(NAN);
+            }
+            count = 0; since_report = 0;
+            return;
+          }
+          absent = false;
+          buf[count % WINDOW] = x;
+          count++;
+          const bool first = (count == 1);
+          if (!first && ++since_report < WINDOW) return;
+          since_report = 0;
+          const int n = std::min<int>(count, WINDOW);
+          float s[WINDOW];
+          // Insertion sort (n <= 10); std::sort here triggers a false -Warray-bounds in GCC 14
+          for (int i = 0; i < n; i++) {
+            float x_i = buf[i];
+            int j = i;
+            for (; j > 0 && s[j - 1] > x_i; j--) s[j] = s[j - 1];
+            s[j] = x_i;
+          }
+          const float v = (n % 2) ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2.0f;
+          id(battery_voltage).publish_state(v);
+          // Rough single-cell Li-ion level: 3.3 V = 0 %, 4.2 V = 100 % (linear).
+          // Reads high while charging; approximate only.
+          id(battery_level).publish_state(std::min(100.0f, std::max(0.0f, (v - 3.3f) / (4.2f - 3.3f) * 100.0f)));
+
+  - platform: template
+    id: battery_voltage
+    name: "Battery voltage"
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: battery_level
+    name: "Battery level"
+    unit_of_measurement: "%"
+    device_class: battery
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    id: next_timer
+    name: "Next timer"
+    update_interval: never
+    disabled_by_default: true
+    device_class: duration
+    unit_of_measurement: s
+    icon: "mdi:timer"
+    accuracy_decimals: 0
+
+text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Reset reason"
+      entity_category: diagnostic
+      disabled_by_default: true
+  - platform: template
+    id: next_timer_name
+    name: "Next timer name"
+    icon: "mdi:timer"
+    disabled_by_default: true
+  - platform: template
+    name: "Alarm time"
+    id: alarm_time
+    icon: mdi:bell-ring
+
+button:
+  - platform: factory_reset
+    id: factory_reset_button
+    name: "Factory Reset"
+    entity_category: diagnostic
+    internal: true
+  - platform: restart
+    id: restart_button
+    name: "Restart"
+    entity_category: config
+    disabled_by_default: true
+    icon: "mdi:restart"
+
+binary_sensor:
+  # AFE voice activity (also the speech gate for direction of arrival later)
+  - platform: gpio
+    name: "Key1"
+    internal: true
+    pin:
+      tca9555: ioexp
+      number: 9 # not '12' as schematics say!
+      inverted: true
+    on_press:
+      - media_player.volume_down: external_media_player
+
+  - platform: gpio
+    name: "Key2"
+    internal: true
+    pin:
+      tca9555: ioexp
+      number: 10
+      inverted: true
+    on_press:
+      # A timer or alarm is ringing -> Play/Pause silences it (works even when muted)
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - switch.turn_off: timer_ringing
+          else:
+            - media_player.toggle: external_media_player
+
+  - platform: gpio
+    name: "Key3"
+    internal: true
+    pin:
+      tca9555: ioexp
+      number: 11
+      inverted: true
+    on_press:
+      - media_player.volume_up: external_media_player
+
+interval:
+  # mww_b and mww_c follow mww: the wake words Home Assistant enabled, and the cutoffs
+  # set by the Wake word sensitivity select (stop is switched on all directly)
+  - interval: 1s
+    then:
+      - lambda: |-
+          auto a = id(mww).get_wake_words();
+          for (auto *other : {id(mww_b), id(mww_c)}) {
+            auto b = other->get_wake_words();
+            for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+              if (a[i]->is_enabled() != b[i]->is_enabled()) {
+                if (a[i]->is_enabled()) {
+                  b[i]->enable();
+                } else {
+                  b[i]->disable();
+                }
+              }
+              if (b[i]->get_probability_cutoff() != a[i]->get_probability_cutoff())
+                b[i]->set_probability_cutoff(a[i]->get_probability_cutoff());
+            }
+          }
+
+  # CPU load per core over the last 60 s (FreeRTOS run-time statistics), for the
+  # CPU load sensors.
+  - interval: 60s
+    then:
+      - lambda: |-
+          struct Prev {
+            TaskHandle_t handle;
+            uint64_t time;
+          };
+          static std::vector<Prev> prev;
+          static uint64_t prev_total = 0;
+          const UBaseType_t cap = uxTaskGetNumberOfTasks() + 8;
+          std::vector<TaskStatus_t> tasks(cap);
+          configRUN_TIME_COUNTER_TYPE total = 0;
+          const UBaseType_t n = uxTaskGetSystemState(tasks.data(), cap, &total);
+          const bool first = prev_total == 0;
+          const double elapsed = static_cast<double>(total - prev_total);
+          double idle[2] = {0, 0};
+          std::vector<Prev> next;
+          next.reserve(n);
+          for (UBaseType_t i = 0; i < n; i++) {
+            const TaskStatus_t &t = tasks[i];
+            const uint64_t now = t.ulRunTimeCounter;
+            next.push_back({t.xHandle, now});
+            uint64_t before = 0;
+            for (const auto &p : prev)
+              if (p.handle == t.xHandle)
+                before = p.time;
+            if (now < before)
+              before = 0;  // a new task at the address of a deleted one (e.g. the AFE rebuilt)
+            if (first || elapsed <= 0)
+              continue;
+            const double pct = 100.0 * static_cast<double>(now - before) / elapsed;
+            const BaseType_t c = xTaskGetCoreID(t.xHandle);  // tskNO_AFFINITY when it may run on either
+            const int core = (c == 0 || c == 1) ? static_cast<int>(c) : -1;
+            if (strncmp(t.pcTaskName, "IDLE", 4) == 0 && core >= 0)
+              idle[core] += pct;
+          }
+          prev.swap(next);
+          prev_total = total;
+          if (first || elapsed <= 0)
+            return;
+          const double load0 = 100.0 - idle[0], load1 = 100.0 - idle[1];
+          id(cpu_load_core0).publish_state(load0);
+          id(cpu_load_core1).publish_state(load1);
