@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.20.12"
+  fw_version: "2026.11.23.4"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -373,18 +373,25 @@ psram:
 time:
   - platform: homeassistant
     id: rtc
-    # No timezone: here on purpose -> the device follows Home Assistant's time zone,
-    # which HA (2026.3+) sends with every time sync.
+    # No timezone: here on purpose -> the time zone of the machine that builds the
+    # firmware is the default, and Home Assistant (2026.3+) replaces it with its own at
+    # every time sync.
     on_time:
       - seconds: 0
         minutes: /1
         then:
           - script.execute: check_alarm
-  # Alternative: on-board PCF85063 RTC (RTC_INT on TCA9555 pin $rtc_int)
-  #- platform: pcf85063
-  #  id: rtc
-  #  address: 0x51
-  #  i2c_id: internal_i2c
+    # Keep the on-board clock chip set from Home Assistant's time
+    on_time_sync:
+      - pcf85063.write_time:
+          id: hw_rtc
+  # On-board PCF85063 clock chip (UTC): sets the device's time at boot, before Wi-Fi and
+  # Home Assistant are up. Keeps time over reboots and OTA updates; over power cuts only
+  # with a backup cell on J9. Interrupt (TCA9555 pin $rtc_int) unused.
+  - platform: pcf85063
+    id: hw_rtc
+    i2c_id: internal_i2c
+    address: 0x51
 
 light:
   - platform: esp32_rmt_led_strip
@@ -629,10 +636,10 @@ external_components:
   # output boost (set_output_boost_db), and the AFE result tap with the esp_afe
   # microphone platform (raw_data channels as microphones, for wake word on the BSS
   # streams). Branch rgitha-prod, pinned by commit.
-  - source: github://rgitha/esphome-audio-stack@b92e0a5a29ee4d7f0d0b7d8b49514db6856e34e8
+  - source: github://rgitha/esphome-audio-stack@d71691d02e5ab5864040e9158d7d917e33712348
     components: [esp_audio_stack, esp_afe]
-  # v0.4.4 (branch main), pinned by commit
-  - source: github://rgitha/esphome-adaptive-volume@8db7c7113402045ee140d9fba0e2fb5536d3434f
+  # v0.4.5 (branch main), pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@faa22f432bba08de921d2258cf02de9e8ed226e5
     components: [adaptive_volume]
   # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
   # repository's components/ at repo_ref
@@ -838,11 +845,14 @@ audio_file:
 media_source:
   - platform: audio_file
     id: audio_file_announcement_source
+    task_stack_in_psram: true  # decoder task stacks in PSRAM (internal RAM is the scarce one)
   - platform: audio_http
     id: http_announcement_source
+    task_stack_in_psram: true
     buffer_size: 250000
   - platform: audio_http
     id: http_media_source
+    task_stack_in_psram: true
     buffer_size: 500000
   - platform: sendspin
     id: sendspin_media_source
@@ -927,8 +937,7 @@ micro_wake_word:
   # unseparated output for comparison (started only if wake_word_output is true). mww
   # follows Home Assistant's wake word choice; mww_b and mww_c copy mww's enabled
   # wake words and cutoffs (interval below). Detections go to the on_wake script,
-  # which acts on the first; every detection or VAD veto also produces one
-  # comparison line with each stream's peak probability (compare_streams).
+  # which acts on the first.
   - id: mww
     task_core: 0 # pinned (raw 0 and output on core 0, raw 1 on core 1)
     # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
@@ -962,11 +971,6 @@ micro_wake_word:
           id: on_wake
           wake_word: !lambda return wake_word;
           stream: 0
-    on_vad_blocked:
-      - script.execute:
-          id: compare_streams
-          wake_word: !lambda return wake_word;
-          trigger: "VAD veto on raw 0"
   - id: mww_b
     task_core: 1 # pinned
     # Larger audio buffer to absorb brief inference delays (default 120 ms), e.g. the
@@ -1000,11 +1004,6 @@ micro_wake_word:
           id: on_wake
           wake_word: !lambda return wake_word;
           stream: 1
-    on_vad_blocked:
-      - script.execute:
-          id: compare_streams
-          wake_word: !lambda return wake_word;
-          trigger: "VAD veto on raw 1"
 
   - id: mww_c # the unseparated output, for comparison only (wake_word_output)
     task_core: 0 # pinned
@@ -1039,11 +1038,6 @@ micro_wake_word:
           id: on_wake
           wake_word: !lambda return wake_word;
           stream: 2
-    on_vad_blocked:
-      - script.execute:
-          id: compare_streams
-          wake_word: !lambda return wake_word;
-          trigger: "VAD veto on output"
 
 voice_assistant:
   id: va
@@ -1311,19 +1305,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: wake_first_stream
-    type: int
-    restore_value: no
-    initial_value: '0'
-  # comparison line already pending / this call is a repeat
-  - id: compare_busy
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: compare_skip
-    type: bool
-    restore_value: no
-    initial_value: 'false'
   - id: led_scene  # requested LED scene (see the Scene effect)
     type: int
     restore_value: no
@@ -1437,44 +1418,6 @@ script:
   # only). The first detection acts (the actions are the former
   # on_wake_word_detected); one on another stream within 1.5 s is the same
   # utterance and is only logged.
-  # One line per wake word event (detection or VAD veto on any stream), 1 s after
-  # the first, with each stream's peak sliding-average probability over the last
-  # ~2 s for that wake word, and whether it fired or was vetoed by VAD. Debug level.
-  - id: compare_streams
-    mode: parallel
-    max_runs: 8
-    parameters:
-      wake_word: string
-      trigger: string
-    then:
-      - lambda: |-
-          id(compare_skip) = id(compare_busy);
-          id(compare_busy) = true;
-      - if:
-          condition:
-            lambda: return !id(compare_skip);
-          then:
-            - delay: 1s
-            - lambda: |-
-                id(compare_busy) = false;
-                const uint32_t now = millis();
-                micro_wake_word::MicroWakeWord *inst[3] = {id(mww), id(mww_b), id(mww_c)};
-                static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
-                std::string line;
-                for (int k = 0; k < 3; k++) {
-                  for (auto *m : inst[k]->get_wake_words()) {
-                    if (m->get_wake_word() != wake_word)
-                      continue;
-                    const uint32_t d = m->get_last_detected_ms(), v = m->get_last_vetoed_ms();
-                    const bool fired = d != 0 && now - d < 2500;
-                    const bool vetoed = !fired && v != 0 && now - v < 2500;
-                    char buf[48];
-                    snprintf(buf, sizeof(buf), "%s%s %.2f%s", k ? " | " : "", NAMES[k], m->get_recent_peak() / 255.0f,
-                             fired ? " fired" : (vetoed ? " vad-veto" : ""));
-                    line += buf;
-                  }
-                }
-                ESP_LOGD("dual_mww", "Compare '%s' (%s): %s", wake_word.c_str(), trigger.c_str(), line.c_str());
   - id: on_wake
     mode: parallel
     max_runs: 4
@@ -1487,24 +1430,10 @@ script:
           const char *name = (stream >= 0 && stream <= 2) ? NAMES[stream] : "?";
           const uint32_t now = millis();
           id(wake_repeat) = now - id(last_wake_ms) < 1500;
-          if (id(wake_repeat)) {
-            ESP_LOGD("dual_mww", "Wake word '%s' also on %s, %u ms later (ignored)", wake_word.c_str(), name,
-                     (unsigned) (now - id(last_wake_ms)));
-          } else {
+          if (!id(wake_repeat)) {  // a repeat (the same word on the other stream) is ignored
             ESP_LOGI("dual_mww", "Wake word '%s' on %s", wake_word.c_str(), name);
             id(last_wake_ms) = now;
-            id(wake_first_stream) = stream;
           }
-      - if:
-          condition:
-            lambda: return !id(wake_repeat);
-          then:
-            - script.execute:
-                id: compare_streams
-                wake_word: !lambda return wake_word;
-                trigger: !lambda |-
-                  static const char *const NAMES[] = {"raw 0", "raw 1", "output"};
-                  return std::string("acted on ") + NAMES[id(wake_first_stream)];
       - if:
           condition:
             lambda: return !id(wake_repeat);
@@ -1625,8 +1554,6 @@ script:
           for (const auto &m : MAP)
             if (effect == m.name) scene = m.scene;
           if (scene >= 0) id(led_scene) = scene;
-          ESP_LOGI("led", "led_set_effect: effect='%s' scene=%d rgb(%.2f, %.2f, %.2f) brightness=%.2f",
-                   effect.c_str(), scene, r, g, b, (float) id(led_ring_brightness).state);
       - if:
           condition:
             lambda: 'return effect == "off";'
@@ -1678,11 +1605,6 @@ script:
           // Refresh timer cache sparsely when needed
           id(check_if_timers_active).execute();
           const bool timers_active = id(is_timer_active);
-
-          ESP_LOGD("led",
-                   "control_leds: wifi=%d api=%d improv=%d init=%d ringing=%d timers_active=%d phase=%d",
-                   (int)wifi_connected, (int)api_connected, (int)improv_ble, (int)init_progress,
-                   (int)ringing, (int)timers_active, phase);
 
           auto set = [&](const char* effect, float r, float g, float b) {
             id(led_set_effect).execute(effect, r, g, b);
@@ -1755,8 +1677,6 @@ script:
           r: 1.0
           g: 1.0
           b: 1.0
-      - lambda: |-
-          ESP_LOGD("led", "volume_changed: level %.0f %%", id(external_media_player).volume * 100.0f);
       - delay: 1.2s
       - script.execute: control_leds
 
@@ -2503,8 +2423,8 @@ interval:
             }
           }
 
-  # CPU per task and per core over the last 60 s (FreeRTOS run-time statistics).
-  # Share of one core; core -1 = the task may run on either core.
+  # CPU load per core over the last 60 s (FreeRTOS run-time statistics), for the
+  # CPU load sensors.
   - interval: 60s
     then:
       - lambda: |-
@@ -2520,12 +2440,6 @@ interval:
           const UBaseType_t n = uxTaskGetSystemState(tasks.data(), cap, &total);
           const bool first = prev_total == 0;
           const double elapsed = static_cast<double>(total - prev_total);
-          struct Row {
-            const char *name;
-            int core;
-            double pct;
-          };
-          std::vector<Row> rows;
           double idle[2] = {0, 0};
           std::vector<Prev> next;
           next.reserve(n);
@@ -2544,20 +2458,13 @@ interval:
             const double pct = 100.0 * static_cast<double>(now - before) / elapsed;
             const BaseType_t c = xTaskGetCoreID(t.xHandle);  // tskNO_AFFINITY when it may run on either
             const int core = (c == 0 || c == 1) ? static_cast<int>(c) : -1;
-            if (strncmp(t.pcTaskName, "IDLE", 4) == 0 && core >= 0) {
+            if (strncmp(t.pcTaskName, "IDLE", 4) == 0 && core >= 0)
               idle[core] += pct;
-            } else if (pct >= 0.1) {
-              rows.push_back({t.pcTaskName, core, pct});
-            }
           }
           prev.swap(next);
           prev_total = total;
           if (first || elapsed <= 0)
             return;
           const double load0 = 100.0 - idle[0], load1 = 100.0 - idle[1];
-          ESP_LOGD("cpu_stats", "CPU load last 60 s: core 0 %.1f %%, core 1 %.1f %%", load0, load1);
-          std::sort(rows.begin(), rows.end(), [](const Row &x, const Row &y) { return x.pct > y.pct; });
-          for (const auto &r : rows)
-            ESP_LOGD("cpu_stats", "  %-16s core %2d  %5.1f %%", r.name, r.core, r.pct);
           id(cpu_load_core0).publish_state(load0);
           id(cpu_load_core1).publish_state(load1);

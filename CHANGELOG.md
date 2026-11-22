@@ -2,6 +2,18 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.23
+
+- **.4** Decoder task stacks of the audio_file and audio_http media sources in PSRAM
+  (internal RAM: on the USB test branch a reply failed to start without it). On-board
+  clock chip (PCF85063) in use: it sets the device's time at boot, before Wi-Fi and Home
+  Assistant are up, and is written from Home Assistant's time at every sync (time zone:
+  still Home Assistant's, the build machine's as the default). Log cleanup: wake word
+  comparison lines, the CPU per-task table and LED debug lines removed (CPU load sensors
+  kept); stack fork rgitha-prod d71691d (one "Output gain" line) and adaptive_volume
+  v0.4.5 faa22f4 (one line per reply, details at VERBOSE). (.1-.3: USB audio test
+  builds, branch usb-audio.)
+
 ## 2026.11.20
 
 - **.12** AFE VAD off and the "Voice Detected" sensor removed (it fed nothing else and
