@@ -15,7 +15,7 @@
 
 namespace esphome::usb_audio {
 
-// The board as a USB Audio Class 1.0 device (TinyUSB, our usb_uac1 layer in uac1/).
+// The board as a USB Audio Class 1.0 device (TinyUSB, our usb_uac1 layer in usb_uac1/).
 //  - PC -> board: 48 kHz 16-bit stereo, mixed to mono, PC volume and mute applied, played
 //    into speaker_ (a mixer input). The PC sends at its own clock: one frame is dropped or
 //    repeated now and then to follow the board's clock (rate measured from packet times).

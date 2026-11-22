@@ -3,7 +3,7 @@
 PC -> board: 48 kHz 16-bit stereo, mixed to mono and played into a speaker (a mixer
 input), following the PC's volume and mute. Board -> PC: a 16 kHz microphone (the AFE
 output), converted to 48 kHz mono. UAC 1.0 needs no driver on Windows 7 and later, Linux
-or macOS. Built on espressif/tinyusb with our own device layer (uac1/: descriptors,
+or macOS. Built on espressif/tinyusb with our own device layer (usb_uac1/: descriptors,
 class requests, the USB task). The USB port then carries audio, not the USB serial console.
 """
 
@@ -98,6 +98,6 @@ async def to_code(config):
     # TinyUSB (UAC 1.0 support since 0.20) and our device layer, which builds TinyUSB
     # with its tusb_config.h
     add_idf_component(name="espressif/tinyusb", ref="0.21.0~6")
-    add_idf_component(name="usb_uac1", path=str(Path(__file__).parent / "uac1"))
+    add_idf_component(name="usb_uac1", path=str(Path(__file__).parent / "usb_uac1"))
     # the USB port is the audio device: no console on USB Serial/JTAG
     add_idf_sdkconfig_option("CONFIG_ESP_CONSOLE_SECONDARY_NONE", True)

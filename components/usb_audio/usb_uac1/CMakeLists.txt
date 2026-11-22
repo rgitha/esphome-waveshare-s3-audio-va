@@ -1,4 +1,5 @@
 # usb_uac1: UAC 1.0 device layer on espressif/tinyusb, for the usb_audio component.
+# The directory name is the component name (usb_uac1), as IDF resolves local components by it.
 # Added to the build by usb_audio's __init__.py (add_idf_component with a local path).
 set(priv_requires esp_timer heap)
 if(${IDF_VERSION_MAJOR} LESS 6)
