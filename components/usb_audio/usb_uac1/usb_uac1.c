@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
+#include "soc/usb_dwc_struct.h"
 #include "tusb.h"
 
 static const char *TAG = "usb_uac1";
@@ -38,9 +39,12 @@ enum { STRID_LANGID = 0, STRID_MANUFACTURER, STRID_PRODUCT, STRID_SERIAL, STRID_
 #define ENT_MIC_FU 0x12  // master mute and volume
 #define ENT_MIC_OT 0x13  // USB streaming out
 
-// A gap this long in PC -> board packets restarts the PC clock estimate (a stream left
-// open by the PC with nothing playing sends no packets)
-#define SPK_TIMING_GAP_US 100000
+// PC clock: from the USB frame number (one frame per ms of the PC's clock) at each
+// PC -> board packet against the board's timer, summed over runs of packets. A gap this
+// long ends a run (a stream left open with nothing playing sends no packets); full-speed
+// frame numbers wrap every 2048 ms.
+#define SPK_RUN_GAP_US 100000
+#define USB_FRAME_MASK 0x7FF
 
 // Class-specific AC units, after the header (wTotalLength counts the header too)
 #define AC_UNITS_LEN                                                                              \
@@ -134,10 +138,21 @@ static volatile bool s_muted, s_mic_muted;
 static volatile int16_t s_volume_256, s_mic_volume_256;  // 1/256 dB, master channel
 
 static portMUX_TYPE s_timing_mux = portMUX_INITIALIZER_UNLOCKED;
-static uint64_t s_spk_frames;  // frames received after the first packet
-static int64_t s_spk_first_us, s_spk_last_us;
+static bool s_run_active;
+static int64_t s_run_last_us;
+static uint32_t s_run_last_frame;
+static uint64_t s_usb_ms;    // PC ms (USB frames) between packets within runs, since connect
+static uint64_t s_board_us;  // board time between the same packets
+static uint32_t s_lost;      // frames within runs that brought no packet
 
 static volatile usb_uac1_counters_t s_counters;
+
+static void req_failed(tusb_control_request_t const *r) {
+  s_counters.req_fail++;
+  s_counters.fail_request = r->bRequest;
+  s_counters.fail_value = r->wValue;
+  s_counters.fail_index = r->wIndex;
+}
 static usb_phy_handle_t s_phy;
 
 // ---------------------------------------------------------------------------
@@ -175,7 +190,15 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 // TinyUSB device and audio callbacks
 // ---------------------------------------------------------------------------
 
-void tud_mount_cb(void) { s_counters.mounts++; }
+void tud_mount_cb(void) {
+  s_counters.mounts++;
+  portENTER_CRITICAL(&s_timing_mux);  // a new connection, perhaps another PC
+  s_run_active = false;
+  s_usb_ms = 0;
+  s_board_us = 0;
+  s_lost = 0;
+  portEXIT_CRITICAL(&s_timing_mux);
+}
 void tud_umount_cb(void) {
   s_counters.unmounts++;
   s_spk_open = s_mic_open = false;
@@ -188,13 +211,8 @@ void tud_resume_cb(void) { s_counters.resumes++; }
 
 static void stream_state(uint8_t itf, uint8_t alt) {
   if (itf == ITF_NUM_AUDIO_STREAMING_SPK) {
-    if (alt != 0 && !s_spk_open) {
-      portENTER_CRITICAL(&s_timing_mux);
-      s_spk_frames = 0;
-      s_spk_first_us = s_spk_last_us = 0;
-      portEXIT_CRITICAL(&s_timing_mux);
+    if (alt != 0 && !s_spk_open)
       s_spk_gen++;
-    }
     s_spk_open = alt != 0;
   } else if (itf == ITF_NUM_AUDIO_STREAMING_MIC) {
     if (alt != 0 && !s_mic_open)
@@ -216,22 +234,28 @@ bool tud_audio_set_itf_close_ep_cb(uint8_t rhport, tusb_control_request_t const 
   return true;
 }
 
-// PC -> board packet arrived (USB interrupt): its timing, for the PC clock estimate
+// PC -> board packet arrived (USB interrupt): USB frame number and board time, for the PC
+// clock estimate and the lost-packet count
 bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out,
                            uint8_t cur_alt_setting) {
   (void) rhport;
+  (void) n_bytes_received;
   (void) func_id;
   (void) ep_out;
   (void) cur_alt_setting;
   const int64_t now = esp_timer_get_time();
+  const uint32_t frame = USB_DWC.dsts_reg.soffn & USB_FRAME_MASK;
   portENTER_CRITICAL_ISR(&s_timing_mux);
-  if (s_spk_first_us == 0 || now - s_spk_last_us > SPK_TIMING_GAP_US) {
-    s_spk_frames = 0;
-    s_spk_first_us = now;  // frames are counted from the next packet on
-  } else {
-    s_spk_frames += n_bytes_received / (UAC1_SPK_CHANNELS * UAC1_BYTES_PER_SAMPLE);
+  if (s_run_active && now - s_run_last_us <= SPK_RUN_GAP_US) {
+    const uint32_t d = (frame - s_run_last_frame) & USB_FRAME_MASK;
+    if (d > 1)
+      s_lost += d - 1;
+    s_usb_ms += d;
+    s_board_us += (uint64_t) (now - s_run_last_us);
   }
-  s_spk_last_us = now;
+  s_run_active = true;
+  s_run_last_us = now;
+  s_run_last_frame = frame;
   portEXIT_CRITICAL_ISR(&s_timing_mux);
   return true;
 }
@@ -245,7 +269,7 @@ bool tud_audio_set_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_req
     if (rate == UAC1_SAMPLE_RATE)
       return true;
   }
-  s_counters.req_fail++;
+  req_failed(p_request);
   return false;
 }
 
@@ -256,7 +280,7 @@ bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_req
                        (uint8_t) ((UAC1_SAMPLE_RATE >> 16) & 0xFF)};
     return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, freq, sizeof(freq));
   }
-  s_counters.req_fail++;
+  req_failed(p_request);
   return false;
 }
 
@@ -291,6 +315,7 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
       p_request->bRequest == AUDIO10_CS_REQ_SET_CUR) {
     if (ctrl == AUDIO10_FU_CTRL_MUTE && p_request->wLength == 1) {
       *muted = buf[0] != 0;
+      if (muted == &s_mic_muted) s_counters.mic_mute_sets++; else s_counters.spk_mute_sets++;
       return true;
     }
     if (ctrl == AUDIO10_FU_CTRL_VOLUME && p_request->wLength == 2) {
@@ -300,10 +325,11 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
       if (v > vmax)
         v = vmax;
       *vol = (int16_t) v;
+      if (vol == &s_mic_volume_256) s_counters.mic_volume_sets++; else s_counters.spk_volume_sets++;
       return true;
     }
   }
-  s_counters.req_fail++;
+  req_failed(p_request);
   return false;
 }
 
@@ -314,6 +340,7 @@ bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
   volatile int16_t *vol;
   int32_t vmin, vmax;
   if (fu_state(TU_U16_HIGH(p_request->wIndex), &muted, &vol, &vmin, &vmax) && channel == 0) {
+    s_counters.gets++;
     if (ctrl == AUDIO10_FU_CTRL_MUTE && p_request->bRequest == AUDIO10_CS_REQ_GET_CUR) {
       uint8_t m = *muted ? 1 : 0;
       return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &m, 1);
@@ -334,13 +361,13 @@ bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
           v = 256;  // 1 dB
           break;
         default:
-          s_counters.req_fail++;
+          req_failed(p_request);
           return false;
       }
       return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &v, sizeof(v));
     }
   }
-  s_counters.req_fail++;
+  req_failed(p_request);
   return false;
 }
 
@@ -418,11 +445,11 @@ int16_t usb_uac1_mic_volume_db256(void) { return s_mic_volume_256; }
 uint16_t usb_uac1_read(void *buf, uint16_t len) { return tud_audio_read(buf, len); }
 uint16_t usb_uac1_available(void) { return tud_audio_available(); }
 
-void usb_uac1_spk_timing(uint64_t *frames, int64_t *first_us, int64_t *last_us) {
+void usb_uac1_spk_clock(uint64_t *usb_ms, uint64_t *board_us, uint32_t *lost) {
   portENTER_CRITICAL(&s_timing_mux);
-  *frames = s_spk_frames;
-  *first_us = s_spk_first_us;
-  *last_us = s_spk_last_us;
+  *usb_ms = s_usb_ms;
+  *board_us = s_board_us;
+  *lost = s_lost;
   portEXIT_CRITICAL(&s_timing_mux);
 }
 
@@ -434,9 +461,7 @@ uint16_t usb_uac1_in_count(void) {
 uint16_t usb_uac1_in_threshold(void) { return tud_audio_n_get_ep_in_fifo_threshold(0); }
 
 void usb_uac1_counters(usb_uac1_counters_t *out) {
-  out->mounts = s_counters.mounts;
-  out->unmounts = s_counters.unmounts;
-  out->suspends = s_counters.suspends;
-  out->resumes = s_counters.resumes;
-  out->req_fail = s_counters.req_fail;
+  portENTER_CRITICAL(&s_timing_mux);
+  memcpy(out, (const void *) &s_counters, sizeof(*out));
+  portEXIT_CRITICAL(&s_timing_mux);
 }

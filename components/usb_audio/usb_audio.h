@@ -13,6 +13,8 @@
 #include <memory>
 #include <string>
 
+#include "usb_uac1.h"
+
 namespace esphome::usb_audio {
 
 // The board as a USB Audio Class 1.0 device (TinyUSB, our usb_uac1 layer in usb_uac1/).
@@ -122,6 +124,8 @@ class UsbAudio : public Component {
   uint32_t vol_changed_ms_{0};
   uint32_t last_stats_ms_{0};
   uint32_t ev_mounts_{0}, ev_unmounts_{0}, ev_suspends_{0}, ev_resumes_{0}, ev_req_fail_{0};
+  uint32_t stats_lost_{0};
+  usb_uac1_counters_t stats_req_{};
 
   Trigger<> playback_start_trigger_;
   Trigger<> playback_end_trigger_;

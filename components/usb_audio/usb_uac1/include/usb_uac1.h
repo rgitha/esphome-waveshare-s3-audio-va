@@ -53,10 +53,10 @@ int16_t usb_uac1_mic_volume_db256(void);  // microphone, 1/256 dB units
 // PC -> board (from the USB task only): bytes of 16-bit stereo frames
 uint16_t usb_uac1_read(void *buf, uint16_t len);
 uint16_t usb_uac1_available(void);
-// Arrival of PC -> board packets (USB interrupt): frames received after the first packet of
-// the current run, and the times (esp_timer, us) of that first and the latest packet. A run
-// restarts after a 100 ms gap without packets.
-void usb_uac1_spk_timing(uint64_t *frames, int64_t *first_us, int64_t *last_us);
+// PC clock (USB interrupt measurements, since the PC connected): PC milliseconds (USB frame
+// numbers) and board microseconds between PC -> board packets within runs of packets (a
+// 100 ms gap ends a run), and the frames within runs that brought no packet (lost).
+void usb_uac1_spk_clock(uint64_t *usb_ms, uint64_t *board_us, uint32_t *lost);
 
 // Board -> PC (from the USB task only): bytes of 16-bit mono samples
 uint16_t usb_uac1_write(const void *buf, uint16_t len);
@@ -66,7 +66,11 @@ uint16_t usb_uac1_in_threshold(void);  // the FIFO level TinyUSB's flow control 
 // Event counters for logging (any task)
 typedef struct {
   uint32_t mounts, unmounts, suspends, resumes;
+  uint32_t spk_volume_sets, spk_mute_sets, mic_volume_sets, mic_mute_sets;  // accepted SET_CUR
+  uint32_t gets;                                                           // feature unit GETs
   uint32_t req_fail;  // class requests we did not support (stalled)
+  uint8_t fail_request;  // the last one: bRequest, wValue, wIndex
+  uint16_t fail_value, fail_index;
 } usb_uac1_counters_t;
 void usb_uac1_counters(usb_uac1_counters_t *out);
 

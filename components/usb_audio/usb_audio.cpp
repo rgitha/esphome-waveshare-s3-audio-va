@@ -156,16 +156,16 @@ void UsbAudio::tick_out_() {
     this->gain_q15_ = mute ? 0 : (int32_t) lroundf(32767.0f * powf(10.0f, (vol / 256.0f) / 20.0f));
   }
 
-  // PC clock against the board's: from the arrival times of the packets (every 500 ms, once
-  // 3 s of packets without a gap are in; until then the last estimate is kept). The speaker
-  // plays at the board's 48 kHz.
+  // PC clock against the board's: USB frames (PC milliseconds) against board time between
+  // packets, summed since the PC connected (every 500 ms, once 10 s are in). Lost packets do
+  // not affect it. The speaker plays at the board's 48 kHz.
   if (now - this->drift_update_ms_ >= 500) {
     this->drift_update_ms_ = now;
-    uint64_t frames;
-    int64_t t0, t1;
-    usb_uac1_spk_timing(&frames, &t0, &t1);
-    if (t0 != 0 && t1 - t0 >= 3000000) {
-      const double d = (double) frames * 1e6 / (double) (t1 - t0) / USB_RATE - 1.0;
+    uint64_t usb_ms, board_us;
+    uint32_t lost;
+    usb_uac1_spk_clock(&usb_ms, &board_us, &lost);
+    if (board_us >= 10000000) {
+      const double d = (double) usb_ms * 1000.0 / (double) board_us - 1.0;
       if (d <= DRIFT_LIMIT && d >= -DRIFT_LIMIT) {
         this->drift_ = d;
         this->st_drift_ppm10_.store((int32_t) lround(d * 1e7), std::memory_order_relaxed);
@@ -347,7 +347,8 @@ void UsbAudio::log_usb_events_() {
   if (c.resumes != this->ev_resumes_)
     ESP_LOGD(TAG, "USB resumed");
   if (c.req_fail != this->ev_req_fail_)
-    ESP_LOGW(TAG, "%u class request(s) from the PC not supported", (unsigned) (c.req_fail - this->ev_req_fail_));
+    ESP_LOGW(TAG, "%u class request(s) from the PC not supported; last: request 0x%02X, value 0x%04X, index 0x%04X",
+             (unsigned) (c.req_fail - this->ev_req_fail_), c.fail_request, c.fail_value, c.fail_index);
   this->ev_mounts_ = c.mounts;
   this->ev_unmounts_ = c.unmounts;
   this->ev_suspends_ = c.suspends;
@@ -429,16 +430,33 @@ void UsbAudio::loop() {
     } else {
       snprintf(clock, sizeof(clock), "%+.1f ppm", ppm10 / 10.0f);
     }
+    uint64_t usb_ms, board_us;
+    uint32_t lost;
+    usb_uac1_spk_clock(&usb_ms, &board_us, &lost);
+    usb_uac1_counters_t c;
+    usb_uac1_counters(&c);
     ESP_LOGD(TAG,
-             "Last 60 s: PC->board %u frames (dropped %u, clock fixes %u, PC clock %s) | board->PC %u samples "
-             "(underrun %u, overflow %u, clock fixes: %u dropped, %u repeated; buffer %d ms) | internal RAM free %u "
-             "(largest block %u)",
+             "Last 60 s: PC->board %u frames (dropped %u, lost packets %u, clock fixes %u, PC clock %s) | board->PC %u "
+             "samples (underrun %u, overflow %u, clock fixes: %u dropped, %u repeated; buffer %d ms) | internal RAM "
+             "free %u (largest block %u)",
              (unsigned) this->st_spk_frames_.exchange(0), (unsigned) this->st_spk_dropped_.exchange(0),
-             (unsigned) this->st_spk_fixes_.exchange(0), clock, (unsigned) this->st_mic_frames_.exchange(0),
-             (unsigned) this->st_mic_underrun_.exchange(0), (unsigned) this->st_ring_overflow_.exchange(0),
-             (unsigned) this->st_mic_drops_.exchange(0), (unsigned) this->st_mic_repeats_.exchange(0),
-             (int) this->st_ring_avg_ms_.load(std::memory_order_relaxed), (unsigned) free_internal(),
-             (unsigned) largest_internal());
+             (unsigned) (lost >= this->stats_lost_ ? lost - this->stats_lost_ : lost), (unsigned) this->st_spk_fixes_.exchange(0), clock,
+             (unsigned) this->st_mic_frames_.exchange(0), (unsigned) this->st_mic_underrun_.exchange(0),
+             (unsigned) this->st_ring_overflow_.exchange(0), (unsigned) this->st_mic_drops_.exchange(0),
+             (unsigned) this->st_mic_repeats_.exchange(0), (int) this->st_ring_avg_ms_.load(std::memory_order_relaxed),
+             (unsigned) free_internal(), (unsigned) largest_internal());
+    ESP_LOGD(TAG,
+             "PC requests (last 60 s): speaker volume %u, mute %u; microphone volume %u, mute %u; reads %u; not "
+             "supported %u | now: speaker %.1f dB%s, microphone %+.1f dB%s",
+             (unsigned) (c.spk_volume_sets - this->stats_req_.spk_volume_sets),
+             (unsigned) (c.spk_mute_sets - this->stats_req_.spk_mute_sets),
+             (unsigned) (c.mic_volume_sets - this->stats_req_.mic_volume_sets),
+             (unsigned) (c.mic_mute_sets - this->stats_req_.mic_mute_sets), (unsigned) (c.gets - this->stats_req_.gets),
+             (unsigned) (c.req_fail - this->stats_req_.req_fail), usb_uac1_volume_db256() / 256.0f,
+             usb_uac1_muted() ? " (muted)" : "", usb_uac1_mic_volume_db256() / 256.0f,
+             usb_uac1_mic_muted() ? " (muted)" : "");
+    this->stats_lost_ = lost;
+    this->stats_req_ = c;
   }
 }
 
