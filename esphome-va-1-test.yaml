@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.22.1"
+  fw_version: "2026.11.22.2"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -631,10 +631,10 @@ external_components:
   # output boost (set_output_boost_db), and the AFE result tap with the esp_afe
   # microphone platform (raw_data channels as microphones, for wake word on the BSS
   # streams). Branch rgitha-prod, pinned by commit.
-  - source: github://rgitha/esphome-audio-stack@b92e0a5a29ee4d7f0d0b7d8b49514db6856e34e8
+  - source: github://rgitha/esphome-audio-stack@d71691d02e5ab5864040e9158d7d917e33712348
     components: [esp_audio_stack, esp_afe]
-  # v0.4.4 (branch main), pinned by commit
-  - source: github://rgitha/esphome-adaptive-volume@8db7c7113402045ee140d9fba0e2fb5536d3434f
+  # v0.4.5 (branch main), pinned by commit
+  - source: github://rgitha/esphome-adaptive-volume@faa22f432bba08de921d2258cf02de9e8ed226e5
     components: [adaptive_volume]
   # voice_assistant from ESPHome 2026.10.2 with the wake-word pre-roll patch, from this
   # repository's components/ at repo_ref

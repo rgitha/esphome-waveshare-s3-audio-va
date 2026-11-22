@@ -4,6 +4,9 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.22
 
+- **.2** (TEST, branch usb-audio) As .1, with the component log cleanups: stack fork
+  rgitha-prod d71691d (one "Output gain" line) and adaptive_volume v0.4.5 faa22f4 (one
+  line per reply; details at VERBOSE).
 - **.1** (TEST, branch usb-audio) USB audio: the board as a USB Audio Class device,
   both directions (component usb_audio on Espressif usb_device_uac): PC -> board 48 kHz
   stereo mixed to mono into a new mixer input (music boost while it plays); board -> PC
