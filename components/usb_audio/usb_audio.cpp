@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "usb_uac1.h"
@@ -21,12 +22,16 @@ static const char *const TAG = "usb_audio";
 static constexpr uint32_t USB_RATE = USB_UAC1_SAMPLE_RATE;  // 48 kHz both ways
 static constexpr uint32_t MIC_RATE = 16000;
 static constexpr size_t MIC_RING_BYTES = MIC_RATE / 5 * sizeof(int16_t);  // 200 ms
-// Board -> PC: the 16 kHz buffer starts feeding at 24 ms and is kept between 3 and 13 ms
-// (its lowest level in each 200 ms window); the microphone delivers ~16 ms blocks.
-static constexpr size_t MIC_START_BYTES = MIC_RATE * 24 / 1000 * sizeof(int16_t);
-static constexpr size_t MIC_LOW_BYTES = MIC_RATE * 3 / 1000 * sizeof(int16_t);
-static constexpr size_t MIC_HIGH_BYTES = MIC_RATE * 13 / 1000 * sizeof(int16_t);
-static constexpr uint32_t MIC_WINDOW_MS = 200;
+// Board -> PC: the 16 kHz buffer starts feeding at 40 ms. Its average level over each 1 s
+// window is kept between 16 and 64 ms: outside the band, one 48 kHz sample is dropped (or
+// repeated) every 250 ms until the average is back at 40 ms. The microphone delivers its
+// audio in blocks, so the level itself swings; the average follows only the clock offset.
+static constexpr size_t MIC_START_BYTES = MIC_RATE * 40 / 1000 * sizeof(int16_t);
+static constexpr size_t MIC_CENTER_BYTES = MIC_START_BYTES;
+static constexpr size_t MIC_LOW_BYTES = MIC_RATE * 16 / 1000 * sizeof(int16_t);
+static constexpr size_t MIC_HIGH_BYTES = MIC_RATE * 64 / 1000 * sizeof(int16_t);
+static constexpr uint32_t MIC_WINDOW_MS = 1000;
+static constexpr uint32_t MIC_FIX_MS = 250;
 static constexpr size_t IN16_MAX = 128;  // 16 kHz samples per tick (8 ms)
 static constexpr uint32_t SOUND_HOLD_MS = 500;  // PC audio silent this long: playback ended
 static constexpr int16_t SOUND_LEVEL = 8;       // |sample| above this counts as sound
@@ -45,10 +50,11 @@ void UsbAudio::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "USB audio (UAC 1.0, test):\n"
                 "  PC -> board: %u Hz 16-bit stereo, mixed to mono, PC volume %d..0 dB\n"
-                "  Board -> PC: %u Hz 16-bit mono (from %u Hz)\n"
+                "  Board -> PC: %u Hz 16-bit mono (from %u Hz), PC volume %d..%+d dB\n"
                 "  Task: core %d, priority %d, stack in %s\n"
                 "  Starts %u s after boot, needs %u bytes of internal RAM free",
                 (unsigned) USB_RATE, this->volume_min_db_, (unsigned) USB_RATE, (unsigned) MIC_RATE,
+                this->mic_volume_min_db_, this->mic_volume_max_db_,
                 this->task_core_, this->task_priority_, this->task_stack_in_psram_ ? "PSRAM" : "internal RAM",
                 (unsigned) (this->start_delay_ms_ / 1000), (unsigned) this->min_free_internal_);
 }
@@ -92,6 +98,8 @@ void UsbAudio::start_() {
   cfg.product = this->product_name_.c_str();
   cfg.serial = this->serial_.c_str();
   cfg.volume_min_db = (int16_t) this->volume_min_db_;
+  cfg.mic_volume_min_db = (int16_t) this->mic_volume_min_db_;
+  cfg.mic_volume_max_db = (int16_t) this->mic_volume_max_db_;
   cfg.task_core = this->task_core_;
   cfg.task_priority = this->task_priority_;
   cfg.task_stack = 4096;
@@ -122,9 +130,8 @@ void UsbAudio::tick_() {
 // PC -> board: 48 kHz stereo from TinyUSB -> mono, volume -> speaker (mixer input)
 void UsbAudio::tick_out_() {
   const uint32_t gen = usb_uac1_spk_generation();
-  if (gen != this->spk_gen_) {  // a new stream: new clock estimate
+  if (gen != this->spk_gen_) {  // a new stream (the clock estimate carries over: same PC)
     this->spk_gen_ = gen;
-    this->drift_ = 0.0;
     this->drift_acc_ = 0.0;
     this->drift_update_ms_ = 0;
   }
@@ -149,19 +156,20 @@ void UsbAudio::tick_out_() {
     this->gain_q15_ = mute ? 0 : (int32_t) lroundf(32767.0f * powf(10.0f, (vol / 256.0f) / 20.0f));
   }
 
-  // PC clock against the board's: from the arrival times of the packets (every 500 ms,
-  // once 3 s of packets are in). The speaker plays at the board's 48 kHz.
+  // PC clock against the board's: from the arrival times of the packets (every 500 ms, once
+  // 3 s of packets without a gap are in; until then the last estimate is kept). The speaker
+  // plays at the board's 48 kHz.
   if (now - this->drift_update_ms_ >= 500) {
     this->drift_update_ms_ = now;
     uint64_t frames;
     int64_t t0, t1;
     usb_uac1_spk_timing(&frames, &t0, &t1);
     if (t0 != 0 && t1 - t0 >= 3000000) {
-      double d = (double) frames * 1e6 / (double) (t1 - t0) / USB_RATE - 1.0;
-      if (d > DRIFT_LIMIT || d < -DRIFT_LIMIT)
-        d = 0.0;
-      this->drift_ = d;
-      this->st_drift_ppm10_.store((int32_t) lround(d * 1e7), std::memory_order_relaxed);
+      const double d = (double) frames * 1e6 / (double) (t1 - t0) / USB_RATE - 1.0;
+      if (d <= DRIFT_LIMIT && d >= -DRIFT_LIMIT) {
+        this->drift_ = d;
+        this->st_drift_ppm10_.store((int32_t) lround(d * 1e7), std::memory_order_relaxed);
+      }
     }
   }
 
@@ -222,7 +230,9 @@ void UsbAudio::tick_in_() {
     this->mic_feeding_ = false;
     this->mic_last_ = 0;
     this->mic_adjust_ = 0;
-    this->ring_min_ = SIZE_MAX;
+    this->mic_mode_ = 0;
+    this->ring_sum_ = 0;
+    this->ring_n_ = 0;
     this->ring_window_ms_ = now;
     size_t left = this->mic_ring_->available();
     while (left > 0) {
@@ -235,23 +245,45 @@ void UsbAudio::tick_in_() {
   if (!usb_uac1_mic_open())
     return;
 
+  // PC volume and mute (Q12: up to +12 dB fits)
+  const int16_t vol = usb_uac1_mic_volume_db256();
+  const bool mute = usb_uac1_mic_muted();
+  if (!this->mic_gain_valid_ || vol != this->mic_vol_db256_ || mute != this->mic_muted_) {
+    this->mic_gain_valid_ = true;
+    this->mic_vol_db256_ = vol;
+    this->mic_muted_ = mute;
+    this->mic_gain_q12_ = mute ? 0 : (int32_t) lroundf(4096.0f * powf(10.0f, (vol / 256.0f) / 20.0f));
+  }
+
   const size_t level = this->mic_ring_->available();
   if (!this->mic_feeding_) {
     if (level < MIC_START_BYTES)
       return;  // TinyUSB sends empty packets until then
     this->mic_feeding_ = true;
     this->ring_window_ms_ = now;
+    this->mic_fix_ms_ = now;
   }
-  // Keep the ring's lowest level within the band: one 48 kHz sample at a time
-  this->ring_min_ = std::min(this->ring_min_, level);
+  // Average level per 1 s window; correct (with hysteresis) when outside the band
+  this->ring_sum_ += level;
+  this->ring_n_++;
   if (now - this->ring_window_ms_ >= MIC_WINDOW_MS) {
-    if (this->ring_min_ > MIC_HIGH_BYTES) {
-      this->mic_adjust_ = 1;
-    } else if (this->ring_min_ < MIC_LOW_BYTES) {
-      this->mic_adjust_ = -1;
+    const size_t avg = (size_t) (this->ring_sum_ / std::max<uint32_t>(this->ring_n_, 1));
+    this->st_ring_avg_ms_.store((int32_t) (avg / sizeof(int16_t) * 1000 / MIC_RATE), std::memory_order_relaxed);
+    if (avg > MIC_HIGH_BYTES) {
+      this->mic_mode_ = 1;
+    } else if (avg < MIC_LOW_BYTES) {
+      this->mic_mode_ = -1;
+    } else if ((this->mic_mode_ == 1 && avg <= MIC_CENTER_BYTES) ||
+               (this->mic_mode_ == -1 && avg >= MIC_CENTER_BYTES)) {
+      this->mic_mode_ = 0;
     }
-    this->ring_min_ = SIZE_MAX;
+    this->ring_sum_ = 0;
+    this->ring_n_ = 0;
     this->ring_window_ms_ = now;
+  }
+  if (this->mic_mode_ != 0 && now - this->mic_fix_ms_ >= MIC_FIX_MS) {
+    this->mic_fix_ms_ = now;
+    this->mic_adjust_ = this->mic_mode_;
   }
 
   const uint16_t count = usb_uac1_in_count();
@@ -270,11 +302,16 @@ void UsbAudio::tick_in_() {
 
   size_t o = 0;
   int16_t prev = this->mic_last_;
+  const int32_t g = this->mic_gain_q12_;
+  auto out = [&](int32_t v) {
+    v = (v * g) >> 12;
+    this->in48_[o++] = (int16_t) (v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+  };
   for (size_t i = 0; i < n16; i++) {
     const int32_t a = prev, b = this->in16_[i];
-    this->in48_[o++] = (int16_t) ((2 * a + b) / 3);
-    this->in48_[o++] = (int16_t) ((a + 2 * b) / 3);
-    this->in48_[o++] = (int16_t) b;
+    out((2 * a + b) / 3);
+    out((a + 2 * b) / 3);
+    out(b);
     prev = this->in16_[i];
   }
   this->mic_last_ = prev;
@@ -284,10 +321,12 @@ void UsbAudio::tick_in_() {
     this->in48_[o] = this->in48_[o - 1];  // repeat it: runs slow
     o++;
   }
-  if (this->mic_adjust_ != 0) {
-    this->mic_adjust_ = 0;
-    this->st_mic_fixes_.fetch_add(1, std::memory_order_relaxed);
+  if (this->mic_adjust_ == 1) {
+    this->st_mic_drops_.fetch_add(1, std::memory_order_relaxed);
+  } else if (this->mic_adjust_ == -1) {
+    this->st_mic_repeats_.fetch_add(1, std::memory_order_relaxed);
   }
+  this->mic_adjust_ = 0;
   usb_uac1_write(this->in48_, (uint16_t) (o * sizeof(int16_t)));
   this->st_mic_frames_.fetch_add(o, std::memory_order_relaxed);
 }
@@ -327,13 +366,19 @@ void UsbAudio::log_usb_events_() {
   const uint32_t now = millis();
   const int16_t vol = usb_uac1_volume_db256();
   const bool mute = usb_uac1_muted();
-  if (vol != this->logged_vol_ || mute != this->logged_mute_) {
+  const int16_t mic_vol = usb_uac1_mic_volume_db256();
+  const bool mic_mute = usb_uac1_mic_muted();
+  if (vol != this->logged_vol_ || mute != this->logged_mute_ || mic_vol != this->logged_mic_vol_ ||
+      mic_mute != this->logged_mic_mute_) {
     if (this->vol_changed_ms_ == 0) {
       this->vol_changed_ms_ = now == 0 ? 1 : now;
     } else if (now - this->vol_changed_ms_ >= 500) {
-      ESP_LOGD(TAG, "PC volume %.1f dB%s", vol / 256.0f, mute ? ", muted" : "");
+      ESP_LOGD(TAG, "PC volume: speaker %.1f dB%s, microphone %+.1f dB%s", vol / 256.0f, mute ? " (muted)" : "",
+               mic_vol / 256.0f, mic_mute ? " (muted)" : "");
       this->logged_vol_ = vol;
       this->logged_mute_ = mute;
+      this->logged_mic_vol_ = mic_vol;
+      this->logged_mic_mute_ = mic_mute;
       this->vol_changed_ms_ = 0;
     }
   }
@@ -378,14 +423,21 @@ void UsbAudio::loop() {
   if (now - this->last_stats_ms_ >= 60000) {
     this->last_stats_ms_ = now;
     const int32_t ppm10 = this->st_drift_ppm10_.load(std::memory_order_relaxed);
+    char clock[24];
+    if (ppm10 == INT32_MIN) {
+      snprintf(clock, sizeof(clock), "not measured");
+    } else {
+      snprintf(clock, sizeof(clock), "%+.1f ppm", ppm10 / 10.0f);
+    }
     ESP_LOGD(TAG,
-             "Last 60 s: PC->board %u frames (dropped %u, clock fixes %u, PC clock %+.1f ppm) | "
-             "board->PC %u samples (underrun %u, clock fixes %u, overflow %u) | internal RAM free %u "
+             "Last 60 s: PC->board %u frames (dropped %u, clock fixes %u, PC clock %s) | board->PC %u samples "
+             "(underrun %u, overflow %u, clock fixes: %u dropped, %u repeated; buffer %d ms) | internal RAM free %u "
              "(largest block %u)",
              (unsigned) this->st_spk_frames_.exchange(0), (unsigned) this->st_spk_dropped_.exchange(0),
-             (unsigned) this->st_spk_fixes_.exchange(0), ppm10 / 10.0f, (unsigned) this->st_mic_frames_.exchange(0),
-             (unsigned) this->st_mic_underrun_.exchange(0), (unsigned) this->st_mic_fixes_.exchange(0),
-             (unsigned) this->st_ring_overflow_.exchange(0), (unsigned) free_internal(),
+             (unsigned) this->st_spk_fixes_.exchange(0), clock, (unsigned) this->st_mic_frames_.exchange(0),
+             (unsigned) this->st_mic_underrun_.exchange(0), (unsigned) this->st_ring_overflow_.exchange(0),
+             (unsigned) this->st_mic_drops_.exchange(0), (unsigned) this->st_mic_repeats_.exchange(0),
+             (int) this->st_ring_avg_ms_.load(std::memory_order_relaxed), (unsigned) free_internal(),
              (unsigned) largest_internal());
   }
 }

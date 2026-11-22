@@ -24,7 +24,9 @@ typedef struct {
   const char *manufacturer;
   const char *product;
   const char *serial;
-  int16_t volume_min_db;  // PC volume range: volume_min_db .. 0 dB, 1 dB steps
+  int16_t volume_min_db;      // speaker volume range: volume_min_db .. 0 dB, 1 dB steps
+  int16_t mic_volume_min_db;  // microphone volume range: mic_volume_min_db .. mic_volume_max_db
+  int16_t mic_volume_max_db;
   int task_core;          // -1: no affinity
   int task_priority;
   uint32_t task_stack;      // bytes
@@ -44,13 +46,16 @@ bool usb_uac1_mic_open(void);         // board -> PC stream open
 uint32_t usb_uac1_spk_generation(void);  // +1 on every PC -> board stream open
 uint32_t usb_uac1_mic_generation(void);  // +1 on every board -> PC stream open
 bool usb_uac1_muted(void);
-int16_t usb_uac1_volume_db256(void);  // 1/256 dB units, volume_min_db*256 .. 0
+int16_t usb_uac1_volume_db256(void);  // speaker, 1/256 dB units, volume_min_db*256 .. 0
+bool usb_uac1_mic_muted(void);
+int16_t usb_uac1_mic_volume_db256(void);  // microphone, 1/256 dB units
 
 // PC -> board (from the USB task only): bytes of 16-bit stereo frames
 uint16_t usb_uac1_read(void *buf, uint16_t len);
 uint16_t usb_uac1_available(void);
-// Arrival of PC -> board packets (USB interrupt): frames received since the stream opened,
-// and the times (esp_timer, us) of the first and the latest packet.
+// Arrival of PC -> board packets (USB interrupt): frames received after the first packet of
+// the current run, and the times (esp_timer, us) of that first and the latest packet. A run
+// restarts after a 100 ms gap without packets.
 void usb_uac1_spk_timing(uint64_t *frames, int64_t *first_us, int64_t *last_us);
 
 // Board -> PC (from the USB task only): bytes of 16-bit mono samples

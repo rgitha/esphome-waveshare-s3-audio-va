@@ -19,9 +19,9 @@ namespace esphome::usb_audio {
 //  - PC -> board: 48 kHz 16-bit stereo, mixed to mono, PC volume and mute applied, played
 //    into speaker_ (a mixer input). The PC sends at its own clock: one frame is dropped or
 //    repeated now and then to follow the board's clock (rate measured from packet times).
-//  - Board -> PC: microphone source at 16 kHz mono, upsampled x3 to 48 kHz. TinyUSB sizes
-//    the packets to the board's clock; the 16 kHz buffer is kept within a band by dropping
-//    or repeating one sample now and then.
+//  - Board -> PC: microphone source at 16 kHz mono, upsampled x3 to 48 kHz, PC volume and
+//    mute applied. TinyUSB sizes the packets to the board's clock; the 16 kHz buffer's
+//    average level is kept within a band by dropping or repeating one sample now and then.
 // Started start_delay after boot, only with min_free_internal bytes of internal RAM free.
 class UsbAudio : public Component {
  public:
@@ -36,6 +36,10 @@ class UsbAudio : public Component {
     this->task_stack_in_psram_ = stack_in_psram;
   }
   void set_volume_min_db(int db) { this->volume_min_db_ = db; }
+  void set_mic_volume_range_db(int min_db, int max_db) {
+    this->mic_volume_min_db_ = min_db;
+    this->mic_volume_max_db_ = max_db;
+  }
 
   void setup() override;
   void loop() override;
@@ -65,6 +69,8 @@ class UsbAudio : public Component {
   int task_priority_{18};
   bool task_stack_in_psram_{true};
   int volume_min_db_{-40};
+  int mic_volume_min_db_{-20};
+  int mic_volume_max_db_{12};
 
   enum class State { WAITING, RUNNING, GAVE_UP } state_{State::WAITING};
 
@@ -89,21 +95,30 @@ class UsbAudio : public Component {
   uint32_t mic_gen_{0};
   bool mic_feeding_{false};  // the ring has filled to its start level since the stream opened
   int16_t mic_last_{0};
-  size_t ring_min_{SIZE_MAX};
+  uint64_t ring_sum_{0};  // ring level, summed over the 1 s window
+  uint32_t ring_n_{0};
   uint32_t ring_window_ms_{0};
-  int mic_adjust_{0};  // +1: drop one 48 kHz sample, -1: repeat one
+  int mic_mode_{0};        // correcting: +1 dropping, -1 repeating, 0 not
+  uint32_t mic_fix_ms_{0};
+  int mic_adjust_{0};      // pending: +1 drop one 48 kHz sample, -1 repeat one
+  int16_t mic_vol_db256_{0};
+  bool mic_muted_{false};
+  bool mic_gain_valid_{false};
+  int32_t mic_gain_q12_{4096};
 
   // ---- shared (USB task writes, main loop reads) ----
   std::atomic<uint32_t> last_sound_ms_{0};
   std::atomic<uint32_t> st_spk_frames_{0}, st_spk_dropped_{0}, st_spk_fixes_{0};
-  std::atomic<uint32_t> st_mic_frames_{0}, st_mic_underrun_{0}, st_mic_fixes_{0}, st_ring_overflow_{0};
-  std::atomic<int32_t> st_drift_ppm10_{0};  // PC clock offset, 0.1 ppm units
+  std::atomic<uint32_t> st_mic_frames_{0}, st_mic_underrun_{0}, st_mic_drops_{0}, st_mic_repeats_{0},
+      st_ring_overflow_{0};
+  std::atomic<int32_t> st_drift_ppm10_{INT32_MIN};  // PC clock offset, 0.1 ppm units (MIN: not measured)
+  std::atomic<int32_t> st_ring_avg_ms_{-1};         // last 1 s average of the 16 kHz buffer
 
   // ---- main loop ----
   bool playing_{false};
   bool spk_open_seen_{false}, mic_open_seen_{false};
-  int16_t logged_vol_{0};
-  bool logged_mute_{false};
+  int16_t logged_vol_{0}, logged_mic_vol_{0};
+  bool logged_mute_{false}, logged_mic_mute_{false};
   uint32_t vol_changed_ms_{0};
   uint32_t last_stats_ms_{0};
   uint32_t ev_mounts_{0}, ev_unmounts_{0}, ev_suspends_{0}, ev_resumes_{0}, ev_req_fail_{0};

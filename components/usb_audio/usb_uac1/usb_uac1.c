@@ -35,12 +35,18 @@ enum { STRID_LANGID = 0, STRID_MANUFACTURER, STRID_PRODUCT, STRID_SERIAL, STRID_
 #define ENT_SPK_FU 0x02  // master mute and volume
 #define ENT_SPK_OT 0x03  // speaker
 #define ENT_MIC_IT 0x11  // microphone
+#define ENT_MIC_FU 0x12  // master mute and volume
 #define ENT_MIC_OT 0x13  // USB streaming out
+
+// A gap this long in PC -> board packets restarts the PC clock estimate (a stream left
+// open by the PC with nothing playing sends no packets)
+#define SPK_TIMING_GAP_US 100000
 
 // Class-specific AC units, after the header (wTotalLength counts the header too)
 #define AC_UNITS_LEN                                                                              \
   (TUD_AUDIO10_DESC_INPUT_TERM_LEN + TUD_AUDIO10_DESC_FEATURE_UNIT_LEN(2) +                      \
-   TUD_AUDIO10_DESC_OUTPUT_TERM_LEN + TUD_AUDIO10_DESC_INPUT_TERM_LEN + TUD_AUDIO10_DESC_OUTPUT_TERM_LEN)
+   TUD_AUDIO10_DESC_OUTPUT_TERM_LEN + TUD_AUDIO10_DESC_INPUT_TERM_LEN + TUD_AUDIO10_DESC_FEATURE_UNIT_LEN(1) + \
+   TUD_AUDIO10_DESC_OUTPUT_TERM_LEN)
 
 #define AS_ALT1_LEN                                                                              \
   (TUD_AUDIO10_DESC_STD_AS_LEN + TUD_AUDIO10_DESC_CS_AS_INT_LEN + TUD_AUDIO10_DESC_TYPE_I_FORMAT_LEN(1) + \
@@ -63,10 +69,13 @@ static const uint8_t desc_configuration[] = {
                                   AUDIO10_FU_CONTROL_BM_MUTE | AUDIO10_FU_CONTROL_BM_VOLUME,  // master
                                   0x0000, 0x0000),                                            // left, right
     TUD_AUDIO10_DESC_OUTPUT_TERM(ENT_SPK_OT, AUDIO_TERM_TYPE_OUT_GENERIC_SPEAKER, 0x00, ENT_SPK_FU, 0x00),
-    // Microphone path: microphone (mono) -> USB streaming
+    // Microphone path: microphone (mono) -> feature unit (master mute, volume) -> USB streaming
     TUD_AUDIO10_DESC_INPUT_TERM(ENT_MIC_IT, AUDIO_TERM_TYPE_IN_GENERIC_MIC, 0x00, UAC1_MIC_CHANNELS,
                                 AUDIO10_CHANNEL_CONFIG_NON_PREDEFINED, 0x00, 0x00),
-    TUD_AUDIO10_DESC_OUTPUT_TERM(ENT_MIC_OT, AUDIO_TERM_TYPE_USB_STREAMING, 0x00, ENT_MIC_IT, 0x00),
+    TUD_AUDIO10_DESC_FEATURE_UNIT(ENT_MIC_FU, ENT_MIC_IT, 0x00,
+                                  AUDIO10_FU_CONTROL_BM_MUTE | AUDIO10_FU_CONTROL_BM_VOLUME,  // master
+                                  0x0000),                                                    // mono
+    TUD_AUDIO10_DESC_OUTPUT_TERM(ENT_MIC_OT, AUDIO_TERM_TYPE_USB_STREAMING, 0x00, ENT_MIC_FU, 0x00),
 
     // ---- Speaker streaming: alt 0 (no bandwidth), alt 1 (48 kHz 16-bit stereo) ----
     TUD_AUDIO10_DESC_STD_AS_INT(ITF_NUM_AUDIO_STREAMING_SPK, 0x00, 0x00, 0x00),
@@ -121,8 +130,8 @@ static uint16_t s_str_buf[32];
 
 static volatile bool s_spk_open, s_mic_open;
 static volatile uint32_t s_spk_gen, s_mic_gen;
-static volatile bool s_muted;
-static volatile int16_t s_volume_256;  // 1/256 dB, master channel
+static volatile bool s_muted, s_mic_muted;
+static volatile int16_t s_volume_256, s_mic_volume_256;  // 1/256 dB, master channel
 
 static portMUX_TYPE s_timing_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t s_spk_frames;  // frames received after the first packet
@@ -216,7 +225,8 @@ bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t fu
   (void) cur_alt_setting;
   const int64_t now = esp_timer_get_time();
   portENTER_CRITICAL_ISR(&s_timing_mux);
-  if (s_spk_first_us == 0) {
+  if (s_spk_first_us == 0 || now - s_spk_last_us > SPK_TIMING_GAP_US) {
+    s_spk_frames = 0;
     s_spk_first_us = now;  // frames are counted from the next packet on
   } else {
     s_spk_frames += n_bytes_received / (UAC1_SPK_CHANNELS * UAC1_BYTES_PER_SAMPLE);
@@ -250,25 +260,46 @@ bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_req
   return false;
 }
 
-// Feature unit requests (master channel only): mute, volume
+// Feature unit requests (master channel only): mute, volume.
+// Speaker: volume_min_db .. 0 dB. Microphone: mic_volume_min_db .. mic_volume_max_db.
+static bool fu_state(uint8_t entity, volatile bool **muted, volatile int16_t **vol, int32_t *vmin, int32_t *vmax) {
+  if (entity == ENT_SPK_FU) {
+    *muted = &s_muted;
+    *vol = &s_volume_256;
+    *vmin = (int32_t) s_cfg.volume_min_db * 256;
+    *vmax = 0;
+    return true;
+  }
+  if (entity == ENT_MIC_FU) {
+    *muted = &s_mic_muted;
+    *vol = &s_mic_volume_256;
+    *vmin = (int32_t) s_cfg.mic_volume_min_db * 256;
+    *vmax = (int32_t) s_cfg.mic_volume_max_db * 256;
+    return true;
+  }
+  return false;
+}
+
 bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *buf) {
   (void) rhport;
   const uint8_t channel = TU_U16_LOW(p_request->wValue);
   const uint8_t ctrl = TU_U16_HIGH(p_request->wValue);
-  const uint8_t entity = TU_U16_HIGH(p_request->wIndex);
-  if (entity == ENT_SPK_FU && channel == 0 && p_request->bRequest == AUDIO10_CS_REQ_SET_CUR) {
+  volatile bool *muted;
+  volatile int16_t *vol;
+  int32_t vmin, vmax;
+  if (fu_state(TU_U16_HIGH(p_request->wIndex), &muted, &vol, &vmin, &vmax) && channel == 0 &&
+      p_request->bRequest == AUDIO10_CS_REQ_SET_CUR) {
     if (ctrl == AUDIO10_FU_CTRL_MUTE && p_request->wLength == 1) {
-      s_muted = buf[0] != 0;
+      *muted = buf[0] != 0;
       return true;
     }
     if (ctrl == AUDIO10_FU_CTRL_VOLUME && p_request->wLength == 2) {
       int32_t v = (int16_t) tu_unaligned_read16(buf);
-      const int32_t vmin = (int32_t) s_cfg.volume_min_db * 256;
       if (v < vmin)
         v = vmin;
-      if (v > 0)
-        v = 0;
-      s_volume_256 = (int16_t) v;
+      if (v > vmax)
+        v = vmax;
+      *vol = (int16_t) v;
       return true;
     }
   }
@@ -279,23 +310,25 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
 bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
   const uint8_t channel = TU_U16_LOW(p_request->wValue);
   const uint8_t ctrl = TU_U16_HIGH(p_request->wValue);
-  const uint8_t entity = TU_U16_HIGH(p_request->wIndex);
-  if (entity == ENT_SPK_FU && channel == 0) {
+  volatile bool *muted;
+  volatile int16_t *vol;
+  int32_t vmin, vmax;
+  if (fu_state(TU_U16_HIGH(p_request->wIndex), &muted, &vol, &vmin, &vmax) && channel == 0) {
     if (ctrl == AUDIO10_FU_CTRL_MUTE && p_request->bRequest == AUDIO10_CS_REQ_GET_CUR) {
-      uint8_t m = s_muted ? 1 : 0;
+      uint8_t m = *muted ? 1 : 0;
       return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &m, 1);
     }
     if (ctrl == AUDIO10_FU_CTRL_VOLUME) {
       int16_t v;
       switch (p_request->bRequest) {
         case AUDIO10_CS_REQ_GET_CUR:
-          v = s_volume_256;
+          v = *vol;
           break;
         case AUDIO10_CS_REQ_GET_MIN:
-          v = (int16_t) (s_cfg.volume_min_db * 256);
+          v = (int16_t) vmin;
           break;
         case AUDIO10_CS_REQ_GET_MAX:
-          v = 0;
+          v = (int16_t) vmax;
           break;
         case AUDIO10_CS_REQ_GET_RES:
           v = 256;  // 1 dB
@@ -330,6 +363,10 @@ esp_err_t usb_uac1_start(const usb_uac1_config_t *config) {
   s_cfg = *config;
   if (s_cfg.volume_min_db > -1)
     s_cfg.volume_min_db = -1;
+  if (s_cfg.mic_volume_min_db > -1)
+    s_cfg.mic_volume_min_db = -1;
+  if (s_cfg.mic_volume_max_db < 0)
+    s_cfg.mic_volume_max_db = 0;
   s_desc_device.idVendor = s_cfg.vid;
   s_desc_device.idProduct = s_cfg.pid;
   s_strings[STRID_MANUFACTURER] = s_cfg.manufacturer;
@@ -337,6 +374,8 @@ esp_err_t usb_uac1_start(const usb_uac1_config_t *config) {
   s_strings[STRID_SERIAL] = s_cfg.serial;
   s_volume_256 = 0;
   s_muted = false;
+  s_mic_volume_256 = 0;  // 0 dB until the PC sets it
+  s_mic_muted = false;
 
   // Internal PHY to the USB OTG controller (takes the port from USB Serial/JTAG)
   usb_phy_config_t phy_conf = {
@@ -373,6 +412,8 @@ uint32_t usb_uac1_spk_generation(void) { return s_spk_gen; }
 uint32_t usb_uac1_mic_generation(void) { return s_mic_gen; }
 bool usb_uac1_muted(void) { return s_muted; }
 int16_t usb_uac1_volume_db256(void) { return s_volume_256; }
+bool usb_uac1_mic_muted(void) { return s_mic_muted; }
+int16_t usb_uac1_mic_volume_db256(void) { return s_mic_volume_256; }
 
 uint16_t usb_uac1_read(void *buf, uint16_t len) { return tud_audio_read(buf, len); }
 uint16_t usb_uac1_available(void) { return tud_audio_available(); }

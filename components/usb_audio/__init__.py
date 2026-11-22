@@ -2,7 +2,7 @@
 
 PC -> board: 48 kHz 16-bit stereo, mixed to mono and played into a speaker (a mixer
 input), following the PC's volume and mute. Board -> PC: a 16 kHz microphone (the AFE
-output), converted to 48 kHz mono. UAC 1.0 needs no driver on Windows 7 and later, Linux
+output), converted to 48 kHz mono, following the PC's microphone level and mute. UAC 1.0 needs no driver on Windows 7 and later, Linux
 or macOS. Built on espressif/tinyusb with our own device layer (usb_uac1/: descriptors,
 class requests, the USB task). The USB port then carries audio, not the USB serial console.
 """
@@ -26,6 +26,8 @@ CONF_TASK_CORE = "task_core"
 CONF_TASK_PRIORITY = "task_priority"
 CONF_TASK_STACK_IN_PSRAM = "task_stack_in_psram"
 CONF_VOLUME_MIN = "volume_min"
+CONF_MIC_VOLUME_MIN = "mic_volume_min"
+CONF_MIC_VOLUME_MAX = "mic_volume_max"
 CONF_ON_PLAYBACK_START = "on_playback_start"
 CONF_ON_PLAYBACK_END = "on_playback_end"
 
@@ -52,6 +54,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_TASK_STACK_IN_PSRAM, default=True): cv.boolean,
         # PC volume slider range: this .. 0 dB
         cv.Optional(CONF_VOLUME_MIN, default=-40): cv.int_range(min=-60, max=-6),
+        # PC microphone level slider range: mic_volume_min .. mic_volume_max dB (0 dB at start)
+        cv.Optional(CONF_MIC_VOLUME_MIN, default=-20): cv.int_range(min=-60, max=-1),
+        cv.Optional(CONF_MIC_VOLUME_MAX, default=12): cv.int_range(min=0, max=12),
         cv.Optional(CONF_ON_PLAYBACK_START): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_PLAYBACK_END): automation.validate_automation(single=True),
     }
@@ -85,6 +90,9 @@ async def to_code(config):
         )
     )
     cg.add(var.set_volume_min_db(config[CONF_VOLUME_MIN]))
+    cg.add(
+        var.set_mic_volume_range_db(config[CONF_MIC_VOLUME_MIN], config[CONF_MIC_VOLUME_MAX])
+    )
     for key, trig in (
         (CONF_ON_PLAYBACK_START, "get_playback_start_trigger"),
         (CONF_ON_PLAYBACK_END, "get_playback_end_trigger"),
