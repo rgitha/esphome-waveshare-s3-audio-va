@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.23.3"
+  fw_version: "2026.11.23.5"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -59,7 +59,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: e408e6817f7439cf8fb574f50b5bed5884b129b8
+  repo_ref: 2accd76a487478611fe261422f186c17280ab33e
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -729,22 +729,23 @@ adaptive_volume:
   id: adaptive
   esp_audio_stack_id: audio_stack
   media_player: external_media_player
-  # The device makes no sound: the room may be measured
+  # The device makes no sound: the room may be measured (PC audio over USB counts as sound)
   idle: |-
     return id(voice_assistant_phase) == ${voice_assist_idle_phase_id} &&
            id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_IDLE &&
-           !id(timer_ringing).state && !id(mic_is_muted);
+           !id(timer_ringing).state && !id(mic_is_muted) && !id(usb).is_playing();
   # A spoken reply to a voice command is playing
   reply: |-
     return id(va_run_active) && id(voice_assistant_phase) == ${voice_assist_replying_phase_id} &&
            id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
   # Output muted or amplifier off: a reply measured now is not counted
-  # Not counted: muted, amplifier off, or music playing under the reply (the mix
-  # with ducked music does not give a clean reply level)
+  # Not counted: muted, amplifier off, or music or PC audio playing under the reply (the
+  # mix with ducked music does not give a clean reply level)
   blocked: |-
     return id(external_media_player).is_muted() || id(mic_is_muted) || !id(amp_enable_8).state ||
            id(http_media_source).get_state() == media_source::MediaSourceState::PLAYING ||
-           id(sendspin_media_source).get_state() == media_source::MediaSourceState::PLAYING;
+           id(sendspin_media_source).get_state() == media_source::MediaSourceState::PLAYING ||
+           id(usb).is_playing();
   speaker_level_nominal: -30   # (S_k diagnostic only in path mode)
   # Path mode: S = path gain (speaker reference -> mic, cross-correlation) + the
   # analogue gain (room noise follows the analogue gain, the path gain does not)
@@ -943,7 +944,8 @@ media_player:
 # PC -> board: 48 kHz stereo, mixed to mono, into the mixer (same output gain and
 # echo-cancellation reference as replies and music; music boost while it plays). The
 # board follows the PC's volume slider (volume_min .. 0 dB) and mute.
-# Board -> PC: the AFE output (echo-cancelled, 16 kHz), as a 48 kHz mono microphone.
+# Board -> PC: the AFE output (echo-cancelled, 16 kHz), as a 48 kHz mono microphone,
+# following the PC's microphone level (mic_volume_min .. mic_volume_max dB) and mute.
 # Starts 10 s after boot, only with 12 KB of internal RAM free; logs the RAM it took.
 usb_audio:
   id: usb
@@ -956,6 +958,8 @@ usb_audio:
   task_priority: 18          # above the AFE and wake word tasks, below the audio stack (19)
   task_stack_in_psram: true
   volume_min: -40            # PC volume slider range: -40 .. 0 dB
+  mic_volume_min: -20        # PC microphone level slider range: -20 .. +12 dB (0 dB at start)
+  mic_volume_max: 12
   on_playback_start:
     - script.execute: update_boost
   on_playback_end:

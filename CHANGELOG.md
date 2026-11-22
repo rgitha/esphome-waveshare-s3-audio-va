@@ -4,6 +4,12 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.23
 
+- **.5** (TEST, branch usb-audio) Microphone level and mute from the PC (-20..+12 dB,
+  0 dB at start): Windows' slider is applied on the board instead of Windows' own steep
+  software volume. PC clock estimate restarts after gaps in playback. Board -> PC clock
+  following on the buffer's 1 s average (fewer, rarer fixes; the clicks). Adaptive
+  volume: PC audio playing counts as sound (room estimate holds, a reply over it is not
+  counted). (.4: production, branch main.)
 - **.3** (TEST, branch usb-audio) As .2, build fix: the device layer folder is now
   components/usb_audio/usb_uac1 (ESP-IDF could not resolve the component by name).
 - **.2** (TEST, branch usb-audio) USB audio as UAC 1.0 (driver built in on Windows 7 and
