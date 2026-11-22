@@ -8,17 +8,20 @@
 #include "esphome/components/ring_buffer/ring_buffer.h"
 #include "esphome/components/speaker/speaker.h"
 
-#include <esp_err.h>
-
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <string>
 
 namespace esphome::usb_audio {
 
-// The board as a USB Audio Class device (Espressif usb_device_uac on TinyUSB).
-//  - PC -> board: 48 kHz 16-bit stereo, mixed to mono, PC volume and mute applied,
-//    played into speaker_ (a mixer input).
-//  - Board -> PC: microphone source at 16 kHz mono, upsampled x3 to 48 kHz.
+// The board as a USB Audio Class 1.0 device (TinyUSB, our usb_uac1 layer in uac1/).
+//  - PC -> board: 48 kHz 16-bit stereo, mixed to mono, PC volume and mute applied, played
+//    into speaker_ (a mixer input). The PC sends at its own clock: one frame is dropped or
+//    repeated now and then to follow the board's clock (rate measured from packet times).
+//  - Board -> PC: microphone source at 16 kHz mono, upsampled x3 to 48 kHz. TinyUSB sizes
+//    the packets to the board's clock; the 16 kHz buffer is kept within a band by dropping
+//    or repeating one sample now and then.
 // Started start_delay after boot, only with min_free_internal bytes of internal RAM free.
 class UsbAudio : public Component {
  public:
@@ -26,6 +29,13 @@ class UsbAudio : public Component {
   void set_speaker(speaker::Speaker *spk) { this->speaker_ = spk; }
   void set_start_delay(uint32_t ms) { this->start_delay_ms_ = ms; }
   void set_min_free_internal(uint32_t bytes) { this->min_free_internal_ = bytes; }
+  void set_product_name(const std::string &name) { this->product_name_ = name; }
+  void set_task(int core, int priority, bool stack_in_psram) {
+    this->task_core_ = core;
+    this->task_priority_ = priority;
+    this->task_stack_in_psram_ = stack_in_psram;
+  }
+  void set_volume_min_db(int db) { this->volume_min_db_ = db; }
 
   void setup() override;
   void loop() override;
@@ -38,28 +48,65 @@ class UsbAudio : public Component {
 
  protected:
   void start_();
-  // usb_device_uac callbacks (its tasks)
-  static esp_err_t output_cb_(uint8_t *buf, size_t len, void *ctx);                       // PC -> board
-  static esp_err_t input_cb_(uint8_t *buf, size_t len, size_t *bytes_read, void *ctx);    // board -> PC
-  static void set_mute_cb_(uint32_t mute, void *ctx);
-  static void set_volume_cb_(uint32_t volume, void *ctx);
+  void log_usb_events_();
+  // USB task (usb_uac1 calls this every 1-2 ms)
+  static void tick_static_(void *ctx) { static_cast<UsbAudio *>(ctx)->tick_(); }
+  void tick_();
+  void tick_out_();  // PC -> board
+  void tick_in_();   // board -> PC
 
   microphone::MicrophoneSource *mic_{nullptr};
   speaker::Speaker *speaker_{nullptr};
   uint32_t start_delay_ms_{10000};
-  uint32_t min_free_internal_{16000};
+  uint32_t min_free_internal_{12000};
+  std::string product_name_{"Voice Assistant"};
+  std::string serial_;
+  int task_core_{0};
+  int task_priority_{18};
+  bool task_stack_in_psram_{true};
+  int volume_min_db_{-40};
 
   enum class State { WAITING, RUNNING, GAVE_UP } state_{State::WAITING};
-  std::unique_ptr<ring_buffer::RingBuffer> mic_ring_;  // 16 kHz mono 16-bit from the microphone
-  int16_t *spk_mono_{nullptr};                          // down-mix buffer (PC -> board)
-  size_t spk_mono_max_{0};
-  int16_t mic_last_{0};                                 // last 16 kHz sample (interpolation)
 
-  std::atomic<uint32_t> last_spk_ms_{0};      // last PC -> board data
-  std::atomic<int32_t> spk_gain_q15_{32767};  // PC volume and mute
-  std::atomic<uint32_t> spk_dropped_{0}, mic_underrun_{0}, spk_frames_{0}, mic_frames_{0};
+  // ---- PC -> board (USB task) ----
+  int16_t *out_buf_{nullptr};   // stereo frames read from TinyUSB
+  int16_t *mono_buf_{nullptr};  // mixed to mono, +2 frames for repeats
+  size_t out_max_frames_{0};
+  uint32_t spk_gen_{0};
+  int16_t vol_db256_{0};
+  bool muted_{false};
+  bool gain_valid_{false};
+  int32_t gain_q15_{32767};
+  double drift_{0.0};      // PC clock vs board clock: PC frames per board frame - 1
+  double drift_acc_{0.0};  // frames to drop (+) or repeat (-)
+  int16_t last_mono_{0};
+  uint32_t drift_update_ms_{0};
+
+  // ---- board -> PC (USB task) ----
+  std::unique_ptr<ring_buffer::RingBuffer> mic_ring_;  // 16 kHz mono 16-bit from the microphone
+  int16_t *in16_{nullptr};
+  int16_t *in48_{nullptr};
+  uint32_t mic_gen_{0};
+  bool mic_feeding_{false};  // the ring has filled to its start level since the stream opened
+  int16_t mic_last_{0};
+  size_t ring_min_{SIZE_MAX};
+  uint32_t ring_window_ms_{0};
+  int mic_adjust_{0};  // +1: drop one 48 kHz sample, -1: repeat one
+
+  // ---- shared (USB task writes, main loop reads) ----
+  std::atomic<uint32_t> last_sound_ms_{0};
+  std::atomic<uint32_t> st_spk_frames_{0}, st_spk_dropped_{0}, st_spk_fixes_{0};
+  std::atomic<uint32_t> st_mic_frames_{0}, st_mic_underrun_{0}, st_mic_fixes_{0}, st_ring_overflow_{0};
+  std::atomic<int32_t> st_drift_ppm10_{0};  // PC clock offset, 0.1 ppm units
+
+  // ---- main loop ----
   bool playing_{false};
+  bool spk_open_seen_{false}, mic_open_seen_{false};
+  int16_t logged_vol_{0};
+  bool logged_mute_{false};
+  uint32_t vol_changed_ms_{0};
   uint32_t last_stats_ms_{0};
+  uint32_t ev_mounts_{0}, ev_unmounts_{0}, ev_suspends_{0}, ev_resumes_{0}, ev_req_fail_{0};
 
   Trigger<> playback_start_trigger_;
   Trigger<> playback_end_trigger_;

@@ -1,14 +1,17 @@
-"""USB audio (test): the board as a USB Audio Class device, both directions.
+"""USB audio (test): the board as a USB Audio Class 1.0 device, both directions.
 
 PC -> board: 48 kHz 16-bit stereo, mixed to mono and played into a speaker (a mixer
-input). Board -> PC: a 16 kHz microphone (the AFE output), converted to 48 kHz mono.
-Built on Espressif's usb_device_uac (TinyUSB). The USB port then carries audio, not the
-USB serial console.
+input), following the PC's volume and mute. Board -> PC: a 16 kHz microphone (the AFE
+output), converted to 48 kHz mono. UAC 1.0 needs no driver on Windows 7 and later, Linux
+or macOS. Built on espressif/tinyusb with our own device layer (uac1/: descriptors,
+class requests, the USB task). The USB port then carries audio, not the USB serial console.
 """
+
+from pathlib import Path
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import microphone, speaker
+from esphome.components import microphone, psram, speaker
 from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_MICROPHONE, CONF_SPEAKER
@@ -20,6 +23,9 @@ CONF_START_DELAY = "start_delay"
 CONF_MIN_FREE_INTERNAL = "min_free_internal"
 CONF_PRODUCT_NAME = "product_name"
 CONF_TASK_CORE = "task_core"
+CONF_TASK_PRIORITY = "task_priority"
+CONF_TASK_STACK_IN_PSRAM = "task_stack_in_psram"
+CONF_VOLUME_MIN = "volume_min"
 CONF_ON_PLAYBACK_START = "on_playback_start"
 CONF_ON_PLAYBACK_END = "on_playback_end"
 
@@ -36,9 +42,16 @@ CONFIG_SCHEMA = cv.Schema(
         # start USB this long after boot (fail safe: a problem cannot lock out OTA)
         cv.Optional(CONF_START_DELAY, default="10s"): cv.positive_time_period_milliseconds,
         # do not start USB if less internal RAM than this is free (bytes)
-        cv.Optional(CONF_MIN_FREE_INTERNAL, default=16000): cv.int_range(min=0, max=200000),
-        cv.Optional(CONF_PRODUCT_NAME, default="Voice Assistant"): cv.string_strict,
+        cv.Optional(CONF_MIN_FREE_INTERNAL, default=12000): cv.int_range(min=0, max=200000),
+        cv.Optional(CONF_PRODUCT_NAME, default="Voice Assistant"): cv.All(
+            cv.string_strict, cv.Length(max=31)
+        ),
+        # USB task: TinyUSB events and the audio work every 1-2 ms
         cv.Optional(CONF_TASK_CORE, default=0): cv.int_range(min=-1, max=1),
+        cv.Optional(CONF_TASK_PRIORITY, default=18): cv.int_range(min=1, max=24),
+        cv.Optional(CONF_TASK_STACK_IN_PSRAM, default=True): cv.boolean,
+        # PC volume slider range: this .. 0 dB
+        cv.Optional(CONF_VOLUME_MIN, default=-40): cv.int_range(min=-60, max=-6),
         cv.Optional(CONF_ON_PLAYBACK_START): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_PLAYBACK_END): automation.validate_automation(single=True),
     }
@@ -63,22 +76,28 @@ async def to_code(config):
     cg.add(var.set_speaker(spk))
     cg.add(var.set_start_delay(config[CONF_START_DELAY]))
     cg.add(var.set_min_free_internal(config[CONF_MIN_FREE_INTERNAL]))
-    for key, trig in ((CONF_ON_PLAYBACK_START, "get_playback_start_trigger"),
-                      (CONF_ON_PLAYBACK_END, "get_playback_end_trigger")):
+    cg.add(var.set_product_name(config[CONF_PRODUCT_NAME]))
+    cg.add(
+        var.set_task(
+            config[CONF_TASK_CORE],
+            config[CONF_TASK_PRIORITY],
+            config[CONF_TASK_STACK_IN_PSRAM],
+        )
+    )
+    cg.add(var.set_volume_min_db(config[CONF_VOLUME_MIN]))
+    for key, trig in (
+        (CONF_ON_PLAYBACK_START, "get_playback_start_trigger"),
+        (CONF_ON_PLAYBACK_END, "get_playback_end_trigger"),
+    ):
         if key in config:
             await automation.build_automation(getattr(var, trig)(), [], config[key])
 
-    add_idf_component(name="espressif/usb_device_uac", ref="1.3.2")
-    # UAC format: 48 kHz 16-bit; PC -> board stereo, board -> PC mono
-    add_idf_sdkconfig_option("CONFIG_UAC_SAMPLE_RATE", 48000)
-    add_idf_sdkconfig_option("CONFIG_UAC_SPEAKER_CHANNEL_NUM", 2)
-    add_idf_sdkconfig_option("CONFIG_UAC_MIC_CHANNEL_NUM", 1)
-    add_idf_sdkconfig_option("CONFIG_UAC_BIT_RESOLUTION_16", True)
-    add_idf_sdkconfig_option("CONFIG_UAC_TUSB_PRODUCT", config[CONF_PRODUCT_NAME])
-    # tasks away from core 1 (AFE feed)
-    core = config[CONF_TASK_CORE]
-    add_idf_sdkconfig_option("CONFIG_UAC_TINYUSB_TASK_CORE", core)
-    add_idf_sdkconfig_option("CONFIG_UAC_SPK_TASK_CORE", core)
-    add_idf_sdkconfig_option("CONFIG_UAC_MIC_TASK_CORE", core)
+    if config[CONF_TASK_STACK_IN_PSRAM]:
+        psram.request_external_task_stack()
+
+    # TinyUSB (UAC 1.0 support since 0.20) and our device layer, which builds TinyUSB
+    # with its tusb_config.h
+    add_idf_component(name="espressif/tinyusb", ref="0.21.0~6")
+    add_idf_component(name="usb_uac1", path=str(Path(__file__).parent / "uac1"))
     # the USB port is the audio device: no console on USB Serial/JTAG
     add_idf_sdkconfig_option("CONFIG_ESP_CONSOLE_SECONDARY_NONE", True)
