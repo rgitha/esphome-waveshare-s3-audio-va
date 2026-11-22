@@ -4,9 +4,11 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.23
 
+- **.3** (TEST, branch usb-audio) As .2, build fix: the device layer folder is now
+  components/usb_audio/usb_uac1 (ESP-IDF could not resolve the component by name).
 - **.2** (TEST, branch usb-audio) USB audio as UAC 1.0 (driver built in on Windows 7 and
   later, Linux, macOS): Espressif's usb_device_uac (UAC 2.0 only) replaced by our own
-  device layer on espressif/tinyusb 0.21.0~6 (components/usb_audio/uac1). One USB task
+  device layer on espressif/tinyusb 0.21.0~6 (components/usb_audio/usb_uac1). One USB task
   (stack in PSRAM, priority 18) reads TinyUSB's 8 ms FIFOs, instead of a 1 ms buffer
   overwritten when a task is late. PC clock followed by dropping or repeating one frame
   now and then (both directions). Board follows the PC volume slider (-40..0 dB) and
