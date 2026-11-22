@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1 Test"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.22.2"
+  fw_version: "2026.11.23.2"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -59,7 +59,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 69980c7fd0bb8be2f11c4fa9fe21a19e2b4773f6
+  repo_ref: fb414d3badfdb2821ea09b9237cbe21f9000d376
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -843,11 +843,14 @@ audio_file:
 media_source:
   - platform: audio_file
     id: audio_file_announcement_source
+    task_stack_in_psram: true  # decoder task stack (internal RAM is short with USB audio)
   - platform: audio_http
     id: http_announcement_source
+    task_stack_in_psram: true
     buffer_size: 250000
   - platform: audio_http
     id: http_media_source
+    task_stack_in_psram: true
     buffer_size: 500000
   - platform: sendspin
     id: sendspin_media_source
@@ -889,6 +892,10 @@ media_player:
           id: media_mixing_input
           decibel_reduction: 10
           duration: 0.0s
+      - mixer_speaker.apply_ducking:
+          id: usb_mixing_input
+          decibel_reduction: 10
+          duration: 0.0s
       # The TTS reply has started playing: replying LEDs now
       - if:
           condition:
@@ -913,6 +920,10 @@ media_player:
                 id: media_mixing_input
                 decibel_reduction: 0
                 duration: 1.0s
+            - mixer_speaker.apply_ducking:
+                id: usb_mixing_input
+                decibel_reduction: 0
+                duration: 1.0s
     on_mute:
       - delay: 100ms  # Debounce
       - script.execute: control_leds_volume_changed
@@ -927,19 +938,24 @@ media_player:
             - delay: 100ms  # Debounce
             - script.execute: control_leds_volume_changed
 
-# TEST (USB audio): the board as a USB Audio Class device, both directions.
+# TEST (USB audio): the board as a USB Audio Class 1.0 device, both directions (no
+# driver needed on Windows 7 and later, Linux, macOS).
 # PC -> board: 48 kHz stereo, mixed to mono, into the mixer (same output gain and
-# echo-cancellation reference as replies and music; music boost while it plays).
+# echo-cancellation reference as replies and music; music boost while it plays). The
+# board follows the PC's volume slider (volume_min .. 0 dB) and mute.
 # Board -> PC: the AFE output (echo-cancelled, 16 kHz), as a 48 kHz mono microphone.
-# Starts 10 s after boot, only with 16 KB of internal RAM free; logs the RAM it took.
+# Starts 10 s after boot, only with 12 KB of internal RAM free; logs the RAM it took.
 usb_audio:
   id: usb
   microphone: afe_mic
   speaker: usb_mixing_input
   product_name: "Voice Assistant 1"
   start_delay: 10s
-  min_free_internal: 16000
+  min_free_internal: 12000
   task_core: 0
+  task_priority: 18          # above the AFE and wake word tasks, below the audio stack (19)
+  task_stack_in_psram: true
+  volume_min: -40            # PC volume slider range: -40 .. 0 dB
   on_playback_start:
     - script.execute: update_boost
   on_playback_end:
@@ -1159,6 +1175,10 @@ voice_assistant:
         id: media_mixing_input
         decibel_reduction: 10 # dB quieter; 0 = full volume
         duration: 0.0s         # The duration of the transition (default is no transition)
+    - mixer_speaker.apply_ducking:
+        id: usb_mixing_input
+        decibel_reduction: 10
+        duration: 0.0s
   on_listening:
     - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
     - script.execute: control_leds
@@ -1249,6 +1269,10 @@ voice_assistant:
         then:
           - mixer_speaker.apply_ducking:
               id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+          - mixer_speaker.apply_ducking:
+              id: usb_mixing_input
               decibel_reduction: 0
               duration: 1.0s
           # If the end happened because of an error, let the error phase on for a second
@@ -2046,10 +2070,18 @@ switch:
           id: media_mixing_input
           decibel_reduction: 0
           duration: 1.0s
+      - mixer_speaker.apply_ducking:
+          id: usb_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
       - script.execute: control_leds
     on_turn_on:
       - mixer_speaker.apply_ducking:
           id: media_mixing_input
+          decibel_reduction: 10
+          duration: 0.0s
+      - mixer_speaker.apply_ducking:
+          id: usb_mixing_input
           decibel_reduction: 10
           duration: 0.0s
       - micro_wake_word.enable_model: stop

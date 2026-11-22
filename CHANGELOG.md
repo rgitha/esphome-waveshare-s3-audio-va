@@ -2,6 +2,20 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.23
+
+- **.2** (TEST, branch usb-audio) USB audio as UAC 1.0 (driver built in on Windows 7 and
+  later, Linux, macOS): Espressif's usb_device_uac (UAC 2.0 only) replaced by our own
+  device layer on espressif/tinyusb 0.21.0~6 (components/usb_audio/uac1). One USB task
+  (stack in PSRAM, priority 18) reads TinyUSB's 8 ms FIFOs, instead of a 1 ms buffer
+  overwritten when a task is late. PC clock followed by dropping or repeating one frame
+  now and then (both directions). Board follows the PC volume slider (-40..0 dB) and
+  mute. Logs connect, disconnect, stream open/close and PC volume.
+- **.1** (TEST, branch usb-audio) Decoder task stacks of the audio_file and audio_http
+  media sources in PSRAM (the TTS reply failed to start: out of internal RAM). USB input
+  ducked with the media input (voice commands, announcements, timer ringing). USB audio
+  tasks at priority 15 (was 5).
+
 ## 2026.11.22
 
 - **.2** (TEST, branch usb-audio) As .1, with the component log cleanups: stack fork
