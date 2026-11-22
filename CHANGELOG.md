@@ -4,6 +4,11 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.23
 
+- **.6** (TEST, branch usb-audio) PC clock measured from the USB frame number (one per PC
+  millisecond) against the board's time, summed since the PC connected: lost packets no
+  longer bias it, and playback starts and stops no longer restart it. Stats: lost
+  packets, and a second line with the PC's volume and mute requests (and unsupported
+  ones, with the last one's details) and the current speaker and microphone levels.
 - **.5** (TEST, branch usb-audio) Microphone level and mute from the PC (-20..+12 dB,
   0 dB at start): Windows' slider is applied on the board instead of Windows' own steep
   software volume. PC clock estimate restarts after gaps in playback. Board -> PC clock
