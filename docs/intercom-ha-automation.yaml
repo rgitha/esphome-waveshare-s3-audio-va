@@ -14,7 +14,9 @@
 #     "Intercom names", max length 255.)
 #
 # Voice: "Okay Nabu, call VA2" (also "ring", "phone") on a satellite -> it calls VA2;
-#   "end the call" / "hang up" -> it hangs up. A call that does not connect -> the
+#   "hang up" / "end the call" -> it hangs up ("No ongoing call." when there is none).
+#   A muted microphone in a call -> the other satellite shows it (slow cyan comet).
+#   A call that does not connect -> the
 #   calling satellite says why ("VA2 didn't answer"); a connected call lost (the other
 #   side silent for 15 s, e.g. switched off) -> both satellites say "Lost the call with VA2".
 #
@@ -23,7 +25,7 @@
 #   and hide its "Intercom endpoint" entity if you like (entity settings -> Visible off;
 #   keep it enabled).
 alias: Intercom by voice
-description: Satellite-to-satellite calls by voice, phonebook and failed-call messages
+description: Satellite-to-satellite calls by voice, phonebook, mute and failed-call messages
 mode: parallel
 max: 20
 triggers:
@@ -42,6 +44,9 @@ triggers:
   - trigger: event
     id: failed
     event_type: esphome.intercom_call_failed
+  - trigger: event
+    id: mute
+    event_type: esphome.intercom_mute
   - trigger: event
     id: online
     event_type: esphome.intercom_online
@@ -66,6 +71,20 @@ variables:
       {% endif %}
     {% endfor %}
     {{ ns.l }}
+  # The other side named in a board's event: the contact name (VA2) or, once the call
+  # connected, the other board's name in HA ("Voice Assistant 2 Intercom"): both -> its
+  # board entry ({} if not found)
+  peer: "{{ (trigger.event.data.contact | default('') | string) if trigger.platform == 'event' else '' }}"
+  peer_board: >-
+    {% set ns = namespace(b={}) %}
+    {% for b in boards %}
+      {% if peer and peer | lower in [b.contact | lower,
+                                       (device_attr(b.device, 'name_by_user') or '') | lower,
+                                       (device_attr(b.device, 'name') or '') | lower] %}
+        {% set ns.b = b %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.b }}
   this_board: >-
     {{ (boards | selectattr('device', 'eq', trigger.device_id) | list | first) | default({}, true)
        if trigger.platform == 'conversation' and trigger.device_id else {} }}
@@ -102,19 +121,7 @@ actions:
               satellite: >-
                 {{ device_entities(trigger.event.data.device_id | default(''))
                    | select('match', 'assist_satellite\\.') | first | default('') }}
-              # the board sends the contact name (VA2) or, after the call connected, the
-              # other board's name in HA ("Voice Assistant 2 Intercom"): both -> VA2
-              peer: "{{ trigger.event.data.contact | default('') | string }}"
-              contact: >-
-                {% set ns = namespace(c='') %}
-                {% for b in boards %}
-                  {% if peer and peer | lower in [b.contact | lower,
-                                         (device_attr(b.device, 'name_by_user') or '') | lower,
-                                         (device_attr(b.device, 'name') or '') | lower] %}
-                    {% set ns.c = b.contact %}
-                  {% endif %}
-                {% endfor %}
-                {{ ns.c or peer or 'the other side' }}
+              contact: "{{ peer_board.contact | default(peer or 'the other side', true) }}"
               message: >-
                 {{ reasons.get(trigger.event.data.reason, "The call to {contact} didn't go through.")
                    | replace('{contact}', contact) }}
@@ -128,6 +135,18 @@ actions:
                 data:
                   message: "{{ message }}"
                   preannounce: false
+
+      # ---- A microphone muted or unmuted in a call: tell the other board ----
+      - conditions:
+          - condition: trigger
+            id: mute
+          - condition: template
+            value_template: "{{ peer_board != {} }}"
+        sequence:
+          - action: "esphome.{{ peer_board.node }}_intercom_peer_muted"
+            continue_on_error: true
+            data:
+              muted: "{{ trigger.event.data.muted | default('false') == 'true' }}"
 
       # ---- Voice: not on an intercom satellite ----
       - conditions:
@@ -199,10 +218,22 @@ actions:
                       dest: "{{ contact }}"
                   - set_conversation_response: "Calling {{ contact }}."
 
-      # ---- Voice: end the call ----
+      # ---- Voice: end the call (also an unanswered or ringing one) ----
       - conditions:
           - condition: trigger
             id: end
         sequence:
-          - action: "esphome.{{ this_board.node }}_hangup_call"
-          - set_conversation_response: "Call ended."
+          - variables:
+              call_state: >-
+                {{ device_entities(trigger.device_id)
+                   | select('match', 'sensor\\..*_intercom_state$')
+                   | map('states') | first | default('idle') }}
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ call_state in ['calling', 'remote_ringing', 'ringing', 'connecting', 'in_call'] }}
+            then:
+              - action: "esphome.{{ this_board.node }}_hangup_call"
+              - set_conversation_response: "Call ended."
+            else:
+              - set_conversation_response: "No ongoing call."

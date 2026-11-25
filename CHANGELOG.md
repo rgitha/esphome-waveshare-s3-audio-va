@@ -4,6 +4,16 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.26
 
+- **.3** (TEST, branch intercom) An unanswered call ends after 30 s on the caller
+  (which tells the other side), and the called board stops ringing by itself after
+  35 s; the ring stops at once when the caller cancels. "Hang up" / "end the call" with
+  no call: "No ongoing call." During a voice command in a call the other side is
+  silent from the wake word on (it already did not hear the command), and there is no
+  wake sound in a call. The microphone mute now mutes the call too; in a call it shows
+  as the pilot amber at the ring brightness. The other side muted shows as a slow cyan
+  comet (sent through the intercom automation, event esphome.intercom_mute). Diagnostic:
+  failed heap allocations are logged (size, internal or PSRAM), and the RAM lines show
+  the lowest free internal RAM since boot.
 - **.2** (TEST, branch intercom) A connected call that is lost (the other side silent
   for 15 s, e.g. switched off) is announced on both satellites: "Lost the call with
   VA2" (was "The call to Voice Assistant 2 Intercom didn't go through", on the caller

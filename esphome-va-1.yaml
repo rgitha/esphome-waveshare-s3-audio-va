@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.26.2"
+  fw_version: "2026.11.26.3"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -127,6 +127,16 @@ esphome:
   comment: "AFE dual-mic, ${fw_version}"
   min_version: 2026.10.0 # esphome-audio-stack requirement (also covers channel_colors)
   on_boot:
+    # TEST (intercom, diagnostic): note every failed heap allocation (size, capabilities);
+    # logged from the main loop (interval below), only when one happened
+    - priority: 1000
+      then:
+        - lambda: |-
+            heap_caps_register_failed_alloc_callback([](size_t size, uint32_t caps, const char *fn) {
+              id(alloc_fail_size) = size;
+              id(alloc_fail_caps) = caps;
+              id(alloc_fail_count) = id(alloc_fail_count) + 1;
+            });
     - priority: 375
       then:
         - sensor.template.publish:
@@ -221,6 +231,14 @@ api:
   # hangup_call, answer_call, decline_call, ...) for Home Assistant
   custom_services: true
   actions:
+    # TEST (intercom): the other side of the call muted or unmuted its microphone (sent
+    # by the intercom automation): LEDs show it
+    - action: intercom_peer_muted
+      variables:
+        muted: bool
+      then:
+        - lambda: id(call_peer_muted) = muted && !id(phone).is_idle();
+        - script.execute: control_leds
     - action: set_led_color
       variables:
         red: float
@@ -436,7 +454,7 @@ light:
             const float D = ${led_transition_ms};
             const float STEP = D / N, CSTEP = 2.0f * D / N;               // fills: a circle in D; comet: in 2 x D
             const float PILOT = ${pilot_level} / 100.0f, BG = PILOT / 2;    // comet background: half the pilot level
-            enum { IDLE, RING, FLASH, BREATHE_SLOW, BREATHE_FAST, SPIN, TIMER, VOLUME };
+            enum { IDLE, RING, FLASH, BREATHE_SLOW, BREATHE_FAST, SPIN, TIMER, VOLUME, SPIN_SLOW };
             enum { NONE, XFADE, FILL, GATHER, TO_PULSE, EMPTY, SPIN_TO_IDLE };
             struct Col { float r, g, b; };
 
@@ -444,7 +462,7 @@ light:
             static int scene = IDLE, choreo = NONE;
             static Col col{1, 1, 1}, prev_col{1, 1, 1};
             static uint32_t t0 = 0, live0 = 0;
-            static float phase = 0, spoke_pos = 0, dist = 0, end = 0;
+            static float phase = 0, spoke_pos = 0, dist = 0, end = 0, sstep = CSTEP;
             static uint32_t timer_left = UINT32_MAX, timer_ms = 0;
 
             auto clampf = [](float x, float a, float b) { return x < a ? a : (x > b ? b : x); };
@@ -473,8 +491,8 @@ light:
               for (int j = 1; j <= len; j++) { const int led = cw(head, -j); l[led] = std::max(l[led], tail_l(j, len)); }
               for (int i = 0; i < N; i++) out[i] = scale(c, unlin(l[i]));
             };
-            auto spin = [&](float tau, Col c, Col *out) {  // the comet, head jumping clockwise a step at a time
-              comet(cw(P0, static_cast<int>(floorf(tau / CSTEP))), c, 1, TAIL, out);
+            auto spin = [&](float tau, Col c, Col *out, float step) {  // the comet, head jumping clockwise a step at a time
+              comet(cw(P0, static_cast<int>(floorf(tau / step))), c, 1, TAIL, out);
             };
             auto live = [&](int s, float tau, Col *out) {
               for (int i = 0; i < N; i++) out[i] = Col{0, 0, 0};
@@ -489,7 +507,8 @@ light:
                   for (int i = 0; i < N; i++) out[i] = scale(col, 0.75f + 0.25f * cosf(TWO_PI * t));  // from the peak
                   break;
                 }
-                case SPIN: spin(tau, col, out); break;
+                case SPIN: spin(tau, col, out, CSTEP); break;
+                case SPIN_SLOW: spin(tau, col, out, 2 * CSTEP); break;  // half speed (intercom: other side muted)
                 case TIMER: {  // countdown: share of lit LEDs = time left, whole LEDs, seconds interpolated
                   const auto &tm = id(first_active_timer);
                   if (tm.seconds_left != timer_left) { timer_left = tm.seconds_left; timer_ms = millis(); }
@@ -538,12 +557,13 @@ light:
               } else if (prev == BREATHE_SLOW && req == BREATHE_FAST) {
                 choreo = NONE;                                    // same pulse, faster, phase kept
                 phase = fmodf(prev_tau, 2400.0f) / 2400.0f * 1200.0f;
-              } else if (prev == SPIN && req == IDLE) {
+              } else if ((prev == SPIN || prev == SPIN_SLOW) && req == IDLE) {
                 choreo = SPIN_TO_IDLE;
-                spoke_pos = floorf(prev_tau / CSTEP);             // head: clockwise steps from the pilot
+                sstep = prev == SPIN_SLOW ? 2 * CSTEP : CSTEP;    // the comet's own speed
+                spoke_pos = floorf(prev_tau / sstep);             // head: clockwise steps from the pilot
                 const int m = ((static_cast<int>(spoke_pos) % N) + N) % N;
                 dist = m == 0 ? 0 : N - m;                        // steps on to the pilot
-                end = (dist + TAIL) * CSTEP;                      // run in, then the tail shrinks into the head
+                end = (dist + TAIL) * sstep;                      // run in, then the tail shrinks into the head
               } else if (req == IDLE) {
                 choreo = EMPTY;
               }
@@ -598,9 +618,9 @@ light:
               case SPIN_TO_IDLE: {  // the comet runs on into the pilot; the head stops there and the tail
                                     // shrinks into it; the dim ring fades, the colour turns to the pilot's
                 if (t < end) {
-                  const float a = smooth(t / end), run_in = dist * CSTEP;
-                  const int moved = std::min(static_cast<int>(dist), static_cast<int>(floorf(t / CSTEP)));
-                  const int len = t < run_in ? TAIL : static_cast<int>(lroundf(TAIL * (1 - (t - run_in) / (TAIL * CSTEP))));
+                  const float a = smooth(t / end), run_in = dist * sstep;
+                  const int moved = std::min(static_cast<int>(dist), static_cast<int>(floorf(t / sstep)));
+                  const int len = t < run_in ? TAIL : static_cast<int>(lroundf(TAIL * (1 - (t - run_in) / (TAIL * sstep))));
                   comet(cw(P0, static_cast<int>(spoke_pos) + moved), mix(prev_col, col, a), 1 - a, len, out);
                 } else {
                   for (int i = 0; i < N; i++) out[i] = Col{0, 0, 0};
@@ -619,6 +639,10 @@ light:
               }
               default: live(scene, ms_since(now, live0), out);
             }
+
+            // TEST (intercom): microphone muted during a call: the pilot amber at the ring's
+            // level, over whatever the ring shows
+            if (id(mic_is_muted) && !id(phone).is_idle()) out[P0] = Col{1.0f, 0.5f, 0.0f};
 
             // ---- output: the light applies the ring brightness (current_color) and the gamma ----
             const float b = std::max(current_color.r, std::max(current_color.g, current_color.b)) / 255.0f;
@@ -856,7 +880,7 @@ speaker:
 # with 16 kHz 16-bit mono PCM). Sends the AFE output (echo-cancelled); the other side
 # plays through its own mixer input. Started by voice through Home Assistant
 # ("call <name>" -> start_call), answered with the wake word, declined with "Stop",
-# ended by voice ("end the call" -> hangup_call) or Key2.
+# ended by voice ("hang up", "end the call" -> hangup_call) or Key2.
 voip_stack:
   id: phone
   transport: udp
@@ -868,6 +892,10 @@ voip_stack:
     channels: [0]
     gain_factor: 1  # digital gain; use the Mic Gain trim instead
   speaker: call_resampling_speaker
+  # An unanswered call: the caller gives up after 30 s (and tells the other side); the
+  # called board stops ringing by itself after 35 s, in case that message is lost
+  calling_timeout: 30s
+  ringing_timeout: 35s
   audio:
     tx:
       sample_rate: 16000
@@ -947,8 +975,14 @@ voip_stack:
                 contact: !lambda return peer;
                 reason: !lambda 'return id(call_connected) ? std::string("lost") : reason;'
     - lambda: id(call_connected) = false;
+    - script.execute: call_ring_stop  # cancelled by the caller, timed out: stop ringing at once
+    - script.execute: control_leds
   on_in_call:
-    - lambda: id(call_connected) = true;
+    - lambda: |-
+        id(call_connected) = true;
+        id(call_peer) = peer;
+        id(call_peer_muted) = false;
+    - script.execute: intercom_send_mute  # the other side learns if this side is muted
     - script.execute: {id: call_ram_log, stage: "connected"}
     - script.execute: call_ring_stop
     - script.execute: call_connect_flash
@@ -967,7 +1001,12 @@ voip_stack:
     - script.execute: {id: call_ram_log, stage: "idle"}
     - script.execute: call_ram_idle_later
     - script.execute: call_ring_stop
-    - microphone.unmute: afe_call_mic
+    - lambda: id(call_peer_muted) = false;
+    - if:
+        condition:
+          lambda: return !id(mic_is_muted) && !id(va_run_active);
+        then:
+          - microphone.unmute: afe_call_mic
     - if:
         condition:
           lambda: return !id(va_run_active) && !id(timer_ringing).state;
@@ -1050,7 +1089,7 @@ media_player:
           duration: 0.0s
       - mixer_speaker.apply_ducking:
           id: call_mixing_input
-          decibel_reduction: 10
+          decibel_reduction: !lambda 'return id(call_rx_muted) ? 255 : 10;'
           duration: 0.0s
       # The TTS reply has started playing: replying LEDs now
       - if:
@@ -1078,7 +1117,7 @@ media_player:
                 duration: 1.0s
             - mixer_speaker.apply_ducking:
                 id: call_mixing_input
-                decibel_reduction: 0
+                decibel_reduction: !lambda 'return id(call_rx_muted) ? 255 : 0;'
                 duration: 1.0s
     on_mute:
       - delay: 100ms  # Debounce
@@ -1311,7 +1350,7 @@ voice_assistant:
         duration: 0.0s         # The duration of the transition (default is no transition)
     - mixer_speaker.apply_ducking:
         id: call_mixing_input
-        decibel_reduction: 10
+        decibel_reduction: !lambda 'return id(call_rx_muted) ? 255 : 10;'  # a command in a call: the other side silent
         duration: 0.0s
   on_listening:
     - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
@@ -1405,6 +1444,7 @@ voice_assistant:
               id: media_mixing_input
               decibel_reduction: !lambda 'return id(phone).is_active() ? 20 : 0;'  # a call keeps music down
               duration: 1.0s
+          - lambda: id(call_rx_muted) = false;  # TEST (intercom): the other side audible again
           - mixer_speaker.apply_ducking:
               id: call_mixing_input
               decibel_reduction: 0
@@ -1420,7 +1460,11 @@ voice_assistant:
               id(reply_pending) = false;
               id(va_run_active) = false;
               id(announcement_boost_active) = false;  // announcement finished
-          - microphone.unmute: afe_call_mic
+          - if:
+              condition:
+                lambda: return !id(mic_is_muted);
+              then:
+                - microphone.unmute: afe_call_mic
           - script.execute: update_boost
           - script.execute: control_leds
   on_timer_finished:
@@ -1477,6 +1521,33 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  - id: call_peer  # the other side of the connected call (its name as voip_stack reports it)
+    type: std::string
+    restore_value: no
+  - id: call_peer_muted  # the other side has muted its microphone (from Home Assistant)
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: call_rx_muted  # a voice command in a call: the other side silent until it ends
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: alloc_fail_count  # diagnostic: failed heap allocations (see on_boot)
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: alloc_fail_logged
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: alloc_fail_size
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: alloc_fail_caps
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   - id: call_flash_ms  # when the call connected (the LED flash)
     type: uint32_t
     restore_value: no
@@ -1678,9 +1749,24 @@ script:
                                                     announcement: true
                                               # Start the voice assistant and play the wake sound, if enabled
                                               else:
+                                                # TEST (intercom): in a call, from the wake word to the end
+                                                # of the command: the other side silent here and not hearing
+                                                # the command; no wake sound
                                                 - if:
                                                     condition:
-                                                      switch.is_on: wake_sound
+                                                      lambda: return id(phone).is_in_call();
+                                                    then:
+                                                      - lambda: id(call_rx_muted) = true;
+                                                      - microphone.mute: afe_call_mic
+                                                      - mixer_speaker.apply_ducking:
+                                                          id: call_mixing_input
+                                                          decibel_reduction: 255
+                                                          duration: 0.0s
+                                                - if:
+                                                    condition:
+                                                      and:
+                                                        - switch.is_on: wake_sound
+                                                        - lambda: return !id(phone).is_in_call();
                                                     then:
                                                       - script.execute:
                                                           id: play_sound
@@ -1756,7 +1842,7 @@ script:
           // scene numbers as in the Scene effect
           static const struct { const char *name; int scene; } MAP[] = {
               {"Pilot", 0}, {"Ring", 1}, {"solid", 1}, {"Flash", 2}, {"Breathe 2.4s", 3},
-              {"Breathe 1.2s", 4}, {"Spin", 5}, {"Timer Tick", 6}, {"Volume Level", 7}};
+              {"Breathe 1.2s", 4}, {"Spin", 5}, {"Timer Tick", 6}, {"Volume Level", 7}, {"Spin Slow", 8}};
           int scene = -1;
           for (const auto &m : MAP)
             if (effect == m.name) scene = m.scene;
@@ -1875,7 +1961,9 @@ script:
           // TEST (intercom): in a call (the voice assistant phases above win while it runs)
           if (id(phone).is_in_call()) {
             if (millis() - id(call_flash_ms) < 600) set("solid", 0.0, 1.0, 1.0);  // bright flash: answered
+            else if (id(call_peer_muted)) set("Spin Slow", 0.0, 0.85, 0.85);  // other side muted: slow comet
             else set("solid", 0.0, 0.6, 0.6);        // steady cyan
+            // (this side muted: the Scene effect draws the pilot amber over any call state)
             return;
           }
 
@@ -1910,9 +1998,24 @@ script:
       stage: string
     then:
       - lambda: |-
-          ESP_LOGI("intercom", "RAM %s: internal free %u, largest block %u", stage.c_str(),
+          ESP_LOGI("intercom", "RAM %s: internal free %u, largest block %u, lowest free since boot %u",
+                   stage.c_str(),
                    (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                   (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                   (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                   (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  # TEST (intercom): in a call, tell the other side (through Home Assistant, the intercom
+  # automation) whether this microphone is muted
+  - id: intercom_send_mute
+    then:
+      - if:
+          condition:
+            lambda: return id(phone).is_in_call() && !id(call_peer).empty();
+          then:
+            - homeassistant.event:
+                event: esphome.intercom_mute
+                data:
+                  contact: !lambda return id(call_peer);
+                  muted: !lambda 'return id(mic_is_muted) ? "true" : "false";'
   # TEST (intercom): tell Home Assistant this board is online, once its connection has
   # settled, so the intercom automation sends every board the current phonebook
   - id: intercom_online
@@ -2253,6 +2356,8 @@ switch:
       - microphone.mute: afe_mic
       - microphone.mute: afe_raw0
       - microphone.mute: afe_raw1
+      - microphone.mute: afe_call_mic  # TEST (intercom): the call too
+      - script.execute: intercom_send_mute
       - script.execute:
           id: flash_ring
           muted: true
@@ -2271,6 +2376,12 @@ switch:
       - microphone.unmute: afe_mic
       - microphone.unmute: afe_raw0
       - microphone.unmute: afe_raw1
+      - if:
+          condition:
+            lambda: return !id(va_run_active);  # a command running keeps the call mic muted until it ends
+          then:
+            - microphone.unmute: afe_call_mic
+      - script.execute: intercom_send_mute
       - script.execute:
           id: flash_ring
           muted: false
@@ -2774,6 +2885,19 @@ interval:
   # set by the Wake word sensitivity select (stop is switched on all directly)
   - interval: 1s
     then:
+      # TEST (intercom, diagnostic): a failed heap allocation since the last check
+      - lambda: |-
+          const uint32_t n = id(alloc_fail_count);
+          if (n != id(alloc_fail_logged)) {
+            ESP_LOGW("intercom", "Allocation failed (%u since boot): %u bytes, caps 0x%04x%s; "
+                     "internal free %u, largest block %u, lowest free since boot %u",
+                     (unsigned) n, (unsigned) id(alloc_fail_size), (unsigned) id(alloc_fail_caps),
+                     (id(alloc_fail_caps) & MALLOC_CAP_SPIRAM) ? " (PSRAM)" : " (internal)",
+                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            id(alloc_fail_logged) = n;
+          }
       - lambda: |-
           auto a = id(mww).get_wake_words();
           for (auto *other : {id(mww_b), id(mww_c)}) {
