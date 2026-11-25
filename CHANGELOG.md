@@ -2,6 +2,19 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.26
+
+- **.1** (TEST, branch intercom) Phonebook from Home Assistant: no contacts or IPs in
+  the YAML. Each board reports contact|node|IP in a diagnostic "Intercom endpoint"
+  entity and sends esphome.intercom_online when HA connects; the intercom automation
+  then sends every board the list of the others (also at HA start). Names: contact from
+  device_name (esphome-va-2 → VA2), extra spoken names in the optional text helper
+  "Intercom names". Fixes: the ring stops at once when a call is declined or the caller
+  hangs up; "Stop" cancels an outgoing call before it connects; call LEDs are cyan
+  (ringing breathes, calling spins, in a call solid, with a bright flash on connect) so
+  they no longer look like the assistant or OTA; while a voice command runs in a call,
+  the other side does not hear it (call microphone muted).
+
 ## 2026.11.25
 
 - **.5** (TEST, branch intercom) Resampler task stacks (announcement, media, call; 3 KB

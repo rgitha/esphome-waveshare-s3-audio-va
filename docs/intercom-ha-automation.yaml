@@ -1,22 +1,30 @@
 # Home Assistant automation for the intercom (TEST, branch intercom).
 # Settings -> Automations & scenes -> Create automation -> Edit in YAML -> paste.
 #
-# "Okay Nabu, call VA2" on a satellite -> that satellite calls VA2. Also "call v-a two",
-#   "call number 2", "call 2 v-a", "call Bravo"; "ring" and "phone" work as "call".
-# "Okay Nabu, end the call" (or "hang up") -> that satellite hangs up.
-# A call that does not connect -> the calling satellite says why ("VA2 didn't answer").
-#   The board sends the event esphome.intercom_call_failed; for that, turn on "Allow the
-#   device to perform Home Assistant actions" for each board (Settings -> Devices &
-#   services -> ESPHome -> the device -> Configure).
+# Nothing to edit here when satellites are added, renamed or move:
+#   - Phonebook: every board reports itself in its "Intercom endpoint" entity
+#     (contact|node|IP, e.g. "VA2|esphome_va_2|192.168.11.43"). When a board comes online
+#     (event esphome.intercom_online) or HA starts, this automation sends every board
+#     the list of all the others (voip_stack's set_roster_json). Contact names come from
+#     the boards' device_name: esphome-va-2 -> VA2.
+#   - Spoken names: "call VA2", "call v-a two", "call number 2", "call 2 v-a" need no
+#     setup. Other names go in the text helper "Intercom names" (optional), e.g.
+#         VA1: alpha, kitchen unit; VA2: bravo
+#     (Settings -> Devices & services -> Helpers -> Create helper -> Text, name
+#     "Intercom names", max length 255.)
 #
-# When you add a satellite, add a line to:
-#   boards:   its device name in HA -> its ESPHome node name (device_name with "-" as
-#             "_"; the board's actions are esphome.<node>_start_call etc.) and its own
-#             contact name (the static contact names in the firmware)
-#   aliases:  spoken names -> contact name (numbers need none: "2" -> VA2)
+# Voice: "Okay Nabu, call VA2" (also "ring", "phone") on a satellite -> it calls VA2;
+#   "end the call" / "hang up" -> it hangs up. A call that does not connect -> the
+#   calling satellite says why ("VA2 didn't answer").
+#
+# Per board, once: Settings -> Devices & services -> ESPHome -> the device ->
+#   Configure -> "Allow the device to perform Home Assistant actions" (for its events),
+#   and hide its "Intercom endpoint" entity if you like (entity settings -> Visible off;
+#   keep it enabled).
 alias: Intercom by voice
-description: Start and end satellite-to-satellite calls by voice
+description: Satellite-to-satellite calls by voice, phonebook and failed-call messages
 mode: parallel
+max: 20
 triggers:
   - trigger: conversation
     id: call
@@ -33,61 +41,98 @@ triggers:
   - trigger: event
     id: failed
     event_type: esphome.intercom_call_failed
+  - trigger: event
+    id: online
+    event_type: esphome.intercom_online
+  - trigger: homeassistant
+    id: online
+    event: start
 variables:
-  boards:
-    Voice Assistant 1 Intercom: {node: esphome_va_1, contact: VA1}
-    Voice Assistant 2 Intercom: {node: esphome_va_2, contact: VA2}
-  aliases:
-    alpha: VA1
-    bravo: VA2
   reasons:
     timeout: "{contact} didn't answer."
     busy: "{contact} is busy."
     declined: "{contact} declined the call."
+  # All boards from their "Intercom endpoint" entities: [{contact, node, ip, device}]
+  boards: >-
+    {% set ns = namespace(l=[]) %}
+    {% for s in states.sensor
+         if s.entity_id.endswith('_intercom_endpoint') and s.state.count('|') == 2 %}
+      {% set p = s.state.split('|') %}
+      {% if p[0] and p[1] and p[2] %}
+        {% set ns.l = ns.l + [{'contact': p[0], 'node': p[1], 'ip': p[2],
+                               'device': device_id(s.entity_id)}] %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.l }}
   this_board: >-
-    {{ boards.get(device_attr(trigger.device_id, 'name'), {})
+    {{ (boards | selectattr('device', 'eq', trigger.device_id) | list | first) | default({}, true)
        if trigger.platform == 'conversation' and trigger.device_id else {} }}
 actions:
-  # A call from a satellite did not connect: say why on that satellite
-  - if:
-      - condition: trigger
-        id: failed
-    then:
-      - variables:
-          satellite: >-
-            {{ device_entities(trigger.event.data.device_id | default(''))
-               | select('match', 'assist_satellite\\.') | first | default('') }}
-          message: >-
-            {{ reasons.get(trigger.event.data.reason, "The call to {contact} didn't go through.")
-               | replace('{contact}', trigger.event.data.contact | default('the other side')) }}
-      - if:
-          - condition: template
-            value_template: "{{ satellite != '' }}"
-        then:
-          - action: assist_satellite.announce
-            target:
-              entity_id: "{{ satellite }}"
-            data:
-              message: "{{ message }}"
-              preannounce: false
-      - stop: failed call announced
-  - if:
-      - condition: template
-        value_template: "{{ this_board == {} }}"
-    then:
-      - set_conversation_response: "I can only do that on an intercom satellite."
-      - stop: no satellite
   - choose:
+      # ---- Phonebook: send every board the list of the others ----
+      - conditions:
+          - condition: trigger
+            id: online
+        sequence:
+          - repeat:
+              for_each: "{{ boards }}"
+              sequence:
+                - action: "esphome.{{ repeat.item.node }}_set_roster_json"
+                  continue_on_error: true
+                  data:
+                    # "complete": true is ignored by the board; it keeps HA from turning
+                    # the JSON text into an object before sending it
+                    roster_json: >-
+                      {% set ns = namespace(c=[]) %}
+                      {% for b in boards if b.contact != repeat.item.contact %}
+                        {% set ns.c = ns.c + [{'name': b.contact, 'address': b.ip,
+                                               'sip_port': 5060, 'rtp_port': 40000,
+                                               'transport': 'udp'}] %}
+                      {% endfor %}
+                      {{ {'contacts': ns.c, 'complete': true} | to_json }}
+
+      # ---- A call that did not connect: say why on the calling satellite ----
+      - conditions:
+          - condition: trigger
+            id: failed
+        sequence:
+          - variables:
+              satellite: >-
+                {{ device_entities(trigger.event.data.device_id | default(''))
+                   | select('match', 'assist_satellite\\.') | first | default('') }}
+              message: >-
+                {{ reasons.get(trigger.event.data.reason, "The call to {contact} didn't go through.")
+                   | replace('{contact}', trigger.event.data.contact | default('the other side')) }}
+          - if:
+              - condition: template
+                value_template: "{{ satellite != '' }}"
+            then:
+              - action: assist_satellite.announce
+                target:
+                  entity_id: "{{ satellite }}"
+                data:
+                  message: "{{ message }}"
+                  preannounce: false
+
+      # ---- Voice: not on an intercom satellite ----
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.platform == 'conversation' and this_board == {} }}"
+        sequence:
+          - set_conversation_response: "I can only do that on an intercom satellite."
+
+      # ---- Voice: call ----
       - conditions:
           - condition: trigger
             id: call
         sequence:
           - variables:
-              # what was heard, tidied: lower case, number words as digits, filler
-              # words ("number", "v a", "voice assistant", ...) dropped
+              # what was heard, tidied: lower case, number words as digits, filler words
+              # ("number", "v a", "voice assistant", ...) dropped
               key: >-
                 {% set digits = {'one': '1', 'won': '1', 'two': '2', 'to': '2', 'too': '2',
-                                 'three': '3', 'four': '4', 'for': '4', 'five': '5'} %}
+                                 'three': '3', 'four': '4', 'for': '4', 'five': '5',
+                                 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9'} %}
                 {% set filler = ['number', 'no', 'the', 'va', 'v', 'a', 'vee', 'voice',
                                  'assistant', 'unit'] %}
                 {% set ns = namespace(out='') %}
@@ -95,9 +140,33 @@ actions:
                   {% if w not in filler %}{% set ns.out = ns.out ~ digits.get(w, w) %}{% endif %}
                 {% endfor %}
                 {{ ns.out | regex_replace('^va|va$', '') }}
-              known: "{{ boards.values() | map(attribute='contact') | list }}"
+              # names from the "Intercom names" helper: "VA1: alpha, kitchen unit; VA2: bravo",
+              # tidied the same way as what was heard
+              aliases: >-
+                {% set digits = {'one': '1', 'won': '1', 'two': '2', 'to': '2', 'too': '2',
+                                 'three': '3', 'four': '4', 'for': '4', 'five': '5',
+                                 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9'} %}
+                {% set filler = ['number', 'no', 'the', 'va', 'v', 'a', 'vee', 'voice',
+                                 'assistant', 'unit'] %}
+                {% set ns = namespace(d={}, k='') %}
+                {% set text = states('input_text.intercom_names') %}
+                {% if text not in ['unknown', 'unavailable', ''] %}
+                  {% for entry in text.split(';') if ':' in entry %}
+                    {% set contact = entry.split(':')[0] | trim | upper %}
+                    {% for n in entry.split(':')[1].split(',') %}
+                      {% set ns.k = '' %}
+                      {% for w in (n | lower | regex_replace('[^a-z0-9]+', ' ')).split() %}
+                        {% if w not in filler %}{% set ns.k = ns.k ~ digits.get(w, w) %}{% endif %}
+                      {% endfor %}
+                      {% if ns.k %}{% set ns.d = dict(ns.d, **{ns.k: contact}) %}{% endif %}
+                    {% endfor %}
+                  {% endfor %}
+                {% endif %}
+                {{ ns.d }}
+              known: "{{ boards | map(attribute='contact') | list }}"
               contact: >-
-                {{ ('VA' ~ (key | int)) if key | regex_match('^[0-9]+$') else aliases.get(key, '') }}
+                {{ ('VA' ~ (key | int)) if key | regex_match('^[0-9]+$')
+                   else aliases.get(key, (key | upper) if (key | upper) in known else '') }}
           - if:
               - condition: template
                 value_template: "{{ contact not in known }}"
@@ -114,6 +183,8 @@ actions:
                     data:
                       dest: "{{ contact }}"
                   - set_conversation_response: "Calling {{ contact }}."
+
+      # ---- Voice: end the call ----
       - conditions:
           - condition: trigger
             id: end
