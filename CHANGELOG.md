@@ -4,11 +4,31 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.25
 
+- **.4** (TEST, branch intercom) Intercom on top of .3 (urgent-only announcement boost:
+  a failed-call message now plays at reply level). The intercom changes are now in
+  esphome-va-1.yaml on the branch (the test file handed out is a copy with friendly
+  "Voice Assistant 1 Intercom"). HA automation: flexible names ("VA2", "v-a two",
+  "number 2", "2 v-a", aliases Alpha and Bravo) and a board no longer calls itself
+  ("You're talking to VA1").
 - **.3** Announcement boost only for urgent announcements: an HA announcement plays at
   the reply level unless the urgent_announcement action was called within 10 s before
   it; then it gets the "Announcement boost" (now 0..12 dB, default +12; was −6..+6 for
   every announcement, plus urgent_boost_db 6 for urgent ones; urgent_boost_db removed).
-  Music boost unchanged. (.1-.2: intercom test builds, branch intercom.)
+  Music boost unchanged.
+- **.2** (TEST, branch intercom) A call that does not connect is explained on the
+  calling satellite: the board sends esphome.intercom_call_failed (contact, reason) and
+  the intercom automation announces it ("VA2 didn't answer", "is busy", "declined the
+  call"). Home Assistant entities trimmed to Intercom state, last reason and destination
+  (diagnostic) and the auto answer and do-not-disturb switches (configuration); the
+  other VoIP entities are internal.
+- **.1** (TEST, branch intercom) Intercom between the satellites with n-IA-hane's VoIP
+  Stack (voip_stack v2026.11.0): SIP calls and 16 kHz PCM audio board to board, static
+  contacts VA1 and VA2. Calls start and end by voice through Home Assistant
+  (docs/intercom-ha-automation.yaml); a ringing call is answered with the wake word and
+  declined with "Stop"; Key2 hangs up. Call audio on its own mixer input (ducked like
+  music by replies, announcements and timers); music 20 dB down during a call. Green
+  LEDs for calls. Auto answer and do-not-disturb switches. Adaptive volume treats a call
+  as sound.
 
 ## 2026.11.23
 

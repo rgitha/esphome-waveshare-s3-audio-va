@@ -1,0 +1,122 @@
+# Home Assistant automation for the intercom (TEST, branch intercom).
+# Settings -> Automations & scenes -> Create automation -> Edit in YAML -> paste.
+#
+# "Okay Nabu, call VA2" on a satellite -> that satellite calls VA2. Also "call v-a two",
+#   "call number 2", "call 2 v-a", "call Bravo"; "ring" and "phone" work as "call".
+# "Okay Nabu, end the call" (or "hang up") -> that satellite hangs up.
+# A call that does not connect -> the calling satellite says why ("VA2 didn't answer").
+#   The board sends the event esphome.intercom_call_failed; for that, turn on "Allow the
+#   device to perform Home Assistant actions" for each board (Settings -> Devices &
+#   services -> ESPHome -> the device -> Configure).
+#
+# When you add a satellite, add a line to:
+#   boards:   its device name in HA -> its ESPHome node name (device_name with "-" as
+#             "_"; the board's actions are esphome.<node>_start_call etc.) and its own
+#             contact name (the static contact names in the firmware)
+#   aliases:  spoken names -> contact name (numbers need none: "2" -> VA2)
+alias: Intercom by voice
+description: Start and end satellite-to-satellite calls by voice
+mode: parallel
+triggers:
+  - trigger: conversation
+    id: call
+    command:
+      - "call [the] {name}"
+      - "ring [the] {name}"
+      - "phone [the] {name}"
+  - trigger: conversation
+    id: end
+    command:
+      - "end [the] call"
+      - "hang up"
+      - "stop [the] call"
+  - trigger: event
+    id: failed
+    event_type: esphome.intercom_call_failed
+variables:
+  boards:
+    Voice Assistant 1 Intercom: {node: esphome_va_1, contact: VA1}
+    Voice Assistant 2 Intercom: {node: esphome_va_2, contact: VA2}
+  aliases:
+    alpha: VA1
+    bravo: VA2
+  reasons:
+    timeout: "{contact} didn't answer."
+    busy: "{contact} is busy."
+    declined: "{contact} declined the call."
+  this_board: >-
+    {{ boards.get(device_attr(trigger.device_id, 'name'), {})
+       if trigger.platform == 'conversation' and trigger.device_id else {} }}
+actions:
+  # A call from a satellite did not connect: say why on that satellite
+  - if:
+      - condition: trigger
+        id: failed
+    then:
+      - variables:
+          satellite: >-
+            {{ device_entities(trigger.event.data.device_id | default(''))
+               | select('match', 'assist_satellite\\.') | first | default('') }}
+          message: >-
+            {{ reasons.get(trigger.event.data.reason, "The call to {contact} didn't go through.")
+               | replace('{contact}', trigger.event.data.contact | default('the other side')) }}
+      - if:
+          - condition: template
+            value_template: "{{ satellite != '' }}"
+        then:
+          - action: assist_satellite.announce
+            target:
+              entity_id: "{{ satellite }}"
+            data:
+              message: "{{ message }}"
+              preannounce: false
+      - stop: failed call announced
+  - if:
+      - condition: template
+        value_template: "{{ this_board == {} }}"
+    then:
+      - set_conversation_response: "I can only do that on an intercom satellite."
+      - stop: no satellite
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: call
+        sequence:
+          - variables:
+              # what was heard, tidied: lower case, number words as digits, filler
+              # words ("number", "v a", "voice assistant", ...) dropped
+              key: >-
+                {% set digits = {'one': '1', 'won': '1', 'two': '2', 'to': '2', 'too': '2',
+                                 'three': '3', 'four': '4', 'for': '4', 'five': '5'} %}
+                {% set filler = ['number', 'no', 'the', 'va', 'v', 'a', 'vee', 'voice',
+                                 'assistant', 'unit'] %}
+                {% set ns = namespace(out='') %}
+                {% for w in (trigger.slots.name | lower | regex_replace('[^a-z0-9]+', ' ')).split() %}
+                  {% if w not in filler %}{% set ns.out = ns.out ~ digits.get(w, w) %}{% endif %}
+                {% endfor %}
+                {{ ns.out | regex_replace('^va|va$', '') }}
+              known: "{{ boards.values() | map(attribute='contact') | list }}"
+              contact: >-
+                {{ ('VA' ~ (key | int)) if key | regex_match('^[0-9]+$') else aliases.get(key, '') }}
+          - if:
+              - condition: template
+                value_template: "{{ contact not in known }}"
+            then:
+              - set_conversation_response: "I don't know {{ trigger.slots.name }}."
+            else:
+              - if:
+                  - condition: template
+                    value_template: "{{ contact == this_board.contact }}"
+                then:
+                  - set_conversation_response: "You're talking to {{ contact }}."
+                else:
+                  - action: "esphome.{{ this_board.node }}_start_call"
+                    data:
+                      dest: "{{ contact }}"
+                  - set_conversation_response: "Calling {{ contact }}."
+      - conditions:
+          - condition: trigger
+            id: end
+        sequence:
+          - action: "esphome.{{ this_board.node }}_hangup_call"
+          - set_conversation_response: "Call ended."

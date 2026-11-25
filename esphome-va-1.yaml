@@ -16,7 +16,14 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.25.3"
+  fw_version: "2026.11.25.4"
+
+  # ---- Intercom (TEST, branch intercom) ----------------------------------------
+  # Static contacts, the same on every board. The HA automation maps spoken forms
+  # ("VA2", "v-a two", "number 2", "Bravo", ...) to these names and stops a board
+  # calling itself.
+  intercom_va1_ip: "192.168.11.42"
+  intercom_va2_ip: "192.168.11.43"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -216,6 +223,9 @@ logger:
 
 api:
   id: api_id
+  # TEST (intercom): voip_stack registers its own actions (start_call(dest),
+  # hangup_call, answer_call, decline_call, ...) for Home Assistant
+  custom_services: true
   actions:
     - action: set_led_color
       variables:
@@ -646,6 +656,10 @@ external_components:
   # word on each BSS stream), task_core pinning, ring_buffer_duration and diagnostics
   - source: github://rgitha/esphome-waveshare-s3-audio-va@${repo_ref}
     components: [voice_assistant, micro_wake_word]
+  # TEST (intercom): n-IA-hane's VoIP Stack (SIP calls, RTP audio, board to board),
+  # v2026.11.0, pinned by commit
+  - source: github://n-IA-hane/esphome-voip-stack@7722bcf45765ab55e35307846c1b26e2c4ec413e
+    components: [voip_stack]
 
 # Audio hardware: one shared I2S bus in 4-slot TDM at 48 kHz.
 # ES7210 slots: 0 = right mic, 2 = left mic, 1 = ES8311 playback reference, 3 = unused
@@ -737,7 +751,7 @@ adaptive_volume:
   idle: |-
     return id(voice_assistant_phase) == ${voice_assist_idle_phase_id} &&
            id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_IDLE &&
-           !id(timer_ringing).state && !id(mic_is_muted);
+           !id(timer_ringing).state && !id(mic_is_muted) && id(phone).is_idle();  // TEST (intercom): a call is sound
   # A spoken reply to a voice command is playing
   reply: |-
     return id(va_run_active) && id(voice_assistant_phase) == ${voice_assist_replying_phase_id} &&
@@ -748,7 +762,8 @@ adaptive_volume:
   blocked: |-
     return id(external_media_player).is_muted() || id(mic_is_muted) || !id(amp_enable_8).state ||
            id(http_media_source).get_state() == media_source::MediaSourceState::PLAYING ||
-           id(sendspin_media_source).get_state() == media_source::MediaSourceState::PLAYING;
+           id(sendspin_media_source).get_state() == media_source::MediaSourceState::PLAYING ||
+           !id(phone).is_idle();  // TEST (intercom): a reply during a call is not counted
   speaker_level_nominal: -30   # (S_k diagnostic only in path mode)
   # Path mode: S = path gain (speaker reference -> mic, cross-correlation) + the
   # analogue gain (room noise follows the analogue gain, the path gain does not)
@@ -814,6 +829,9 @@ speaker:
         timeout: never
       - id: media_mixing_input
         timeout: never
+      # TEST (intercom): the other side of a call (16 kHz, resampled to 48 kHz)
+      - id: call_mixing_input
+        timeout: never
 
   # Virtual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
   - platform: resampler
@@ -822,6 +840,113 @@ speaker:
   - platform: resampler
     id: media_resampling_speaker
     output_speaker: media_mixing_input
+  - platform: resampler
+    id: call_resampling_speaker
+    output_speaker: call_mixing_input
+    bits_per_sample: 16  # stated: voip_stack reads the format from its speaker
+
+# TEST (intercom): calls between the satellites, board to board (SIP over UDP, RTP
+# with 16 kHz 16-bit mono PCM). Sends the AFE output (echo-cancelled); the other side
+# plays through its own mixer input. Started by voice through Home Assistant
+# ("call <name>" -> start_call), answered with the wake word, declined with "Stop",
+# ended by voice ("end the call" -> hangup_call) or Key2.
+voip_stack:
+  id: phone
+  transport: udp
+  sip_port: 5060
+  rtp_port: 40000
+  microphone_source:
+    microphone: afe_mic
+    bits_per_sample: 16
+    channels: [0]
+    gain_factor: 1  # digital gain; use the Mic Gain trim instead
+  speaker: call_resampling_speaker
+  audio:
+    tx:
+      sample_rate: 16000
+      pcm_format: s16le
+      channels: 1
+      frame_ms: 20
+    rx:
+      sample_rate: 16000
+      pcm_format: s16le
+      channels: 1
+      frame_ms: 20
+  # internal RAM is the scarce one
+  buffers_in_psram: true
+  task_stacks_in_psram: true
+  audio_task_stacks_in_psram: true
+  static_contacts:
+    - name: VA1
+      ip: ${intercom_va1_ip}
+    - name: VA2
+      ip: ${intercom_va2_ip}
+  # Home Assistant: its actions (start_call, hangup_call, ...) stay; of its entities only
+  # state, last reason and destination are shown (the others serve the HA phonebook,
+  # groups and bridging, not used with static contacts)
+  ha_integration:
+    state:
+      name: "Intercom state"
+      entity_category: diagnostic
+    last_reason:
+      name: "Intercom last reason"
+      entity_category: diagnostic
+    destination:
+      name: "Intercom destination"
+      entity_category: diagnostic
+    caller:
+      internal: true
+    contacts:
+      internal: true
+    endpoint:
+      internal: true
+    media_route:
+      internal: true
+    extension:
+      internal: true
+    ring_groups:
+      internal: true
+    conference_groups:
+      internal: true
+    conference_ring:
+      internal: true
+  on_ringing:  # incoming call
+    - lambda: id(call_outgoing) = false;
+    - script.execute: call_ring_start
+  on_calling:  # outgoing call
+    - lambda: id(call_outgoing) = true;
+    - script.execute: control_leds
+  # An outgoing call that did not connect: Home Assistant says why on this satellite
+  # (the intercom automation, event trigger). Needs "Allow the device to perform Home
+  # Assistant actions" on for this device in HA's ESPHome integration.
+  on_call_failed:
+    - if:
+        condition:
+          lambda: return id(call_outgoing) && reason != "cancelled";
+        then:
+          - homeassistant.event:
+              event: esphome.intercom_call_failed
+              data:
+                contact: !lambda return peer;
+                reason: !lambda return reason;
+  on_in_call:
+    - script.execute: call_ring_stop
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 20
+        duration: 0.5s
+    - script.execute: control_leds
+  on_idle:
+    - script.execute: call_ring_stop
+    - if:
+        condition:
+          lambda: return !id(va_run_active) && !id(timer_ringing).state;
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+    - script.execute: control_leds
 
 sendspin:
   id: sendspin_hub
@@ -893,6 +1018,10 @@ media_player:
           id: media_mixing_input
           decibel_reduction: 10
           duration: 0.0s
+      - mixer_speaker.apply_ducking:
+          id: call_mixing_input
+          decibel_reduction: 10
+          duration: 0.0s
       # The TTS reply has started playing: replying LEDs now
       - if:
           condition:
@@ -915,6 +1044,10 @@ media_player:
           then:
             - mixer_speaker.apply_ducking:
                 id: media_mixing_input
+                decibel_reduction: !lambda 'return id(phone).is_active() ? 20 : 0;'  # a call keeps music down
+                duration: 1.0s
+            - mixer_speaker.apply_ducking:
+                id: call_mixing_input
                 decibel_reduction: 0
                 duration: 1.0s
     on_mute:
@@ -1145,6 +1278,10 @@ voice_assistant:
         id: media_mixing_input
         decibel_reduction: 10 # dB quieter; 0 = full volume
         duration: 0.0s         # The duration of the transition (default is no transition)
+    - mixer_speaker.apply_ducking:
+        id: call_mixing_input
+        decibel_reduction: 10
+        duration: 0.0s
   on_listening:
     - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
     - script.execute: control_leds
@@ -1235,6 +1372,10 @@ voice_assistant:
         then:
           - mixer_speaker.apply_ducking:
               id: media_mixing_input
+              decibel_reduction: !lambda 'return id(phone).is_active() ? 20 : 0;'  # a call keeps music down
+              duration: 1.0s
+          - mixer_speaker.apply_ducking:
+              id: call_mixing_input
               decibel_reduction: 0
               duration: 1.0s
           # If the end happened because of an error, let the error phase on for a second
@@ -1295,6 +1436,11 @@ voice_assistant:
         // LED updates are handled centrally by control_leds()
 
 globals:
+  # TEST (intercom): the current or last call was started here
+  - id: call_outgoing
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   # Dual wake word: time of the last acted-on detection; repeat flag
   - id: last_wake_ms
     type: uint32_t
@@ -1442,47 +1588,61 @@ script:
                 condition:
                   switch.is_off: mic_mute_switch
                 then:
-                  # If a timer is ringing: Stop it, do not start the voice assistant (We can stop timer from voice!)
+                  # TEST (intercom): a call is ringing -> "Stop" declines it, a wake word
+                  # answers it (no voice assistant run)
                   - if:
                       condition:
-                        switch.is_on: timer_ringing
+                        lambda: return id(phone).is_ringing();
                       then:
-                        - switch.turn_off: timer_ringing
-                      # Stop voice assistant if running
-                      else:
                         - if:
                             condition:
-                              voice_assistant.is_running:
+                              lambda: return strcasecmp(wake_word.c_str(), "stop") == 0;
                             then:
-                              voice_assistant.stop:
-                            # Stop any other media player announcement, or a reply still on its way
-                            # (the run can end before its audio starts)
+                              - voip_stack.decline_call: phone
+                            else:
+                              - voip_stack.answer_call: phone
+                      else:
+                        # If a timer is ringing: Stop it, do not start the voice assistant (We can stop timer from voice!)
+                        - if:
+                            condition:
+                              switch.is_on: timer_ringing
+                            then:
+                              - switch.turn_off: timer_ringing
+                            # Stop voice assistant if running
                             else:
                               - if:
                                   condition:
-                                    or:
-                                      - media_player.is_announcing: external_media_player
-                                      - lambda: return id(reply_pending);
+                                    voice_assistant.is_running:
                                   then:
-                                    - lambda: id(reply_pending) = false;
-                                    - media_player.stop:
-                                        id: external_media_player
-                                        announcement: true
-                                  # Start the voice assistant and play the wake sound, if enabled
+                                    voice_assistant.stop:
+                                  # Stop any other media player announcement, or a reply still on its way
+                                  # (the run can end before its audio starts)
                                   else:
                                     - if:
                                         condition:
-                                          switch.is_on: wake_sound
+                                          or:
+                                            - media_player.is_announcing: external_media_player
+                                            - lambda: return id(reply_pending);
                                         then:
-                                          - script.execute:
-                                              id: play_sound
-                                              priority: true
-                                              sound_file: "wake_word_triggered_sound"
-                                          - delay: 300ms
-                                    # STT gets the stream that fired
-                                    - lambda: id(va).select_stream(stream);
-                                    - voice_assistant.start:
-                                        wake_word: !lambda return wake_word;
+                                          - lambda: id(reply_pending) = false;
+                                          - media_player.stop:
+                                              id: external_media_player
+                                              announcement: true
+                                        # Start the voice assistant and play the wake sound, if enabled
+                                        else:
+                                          - if:
+                                              condition:
+                                                switch.is_on: wake_sound
+                                              then:
+                                                - script.execute:
+                                                    id: play_sound
+                                                    priority: true
+                                                    sound_file: "wake_word_triggered_sound"
+                                                - delay: 300ms
+                                          # STT gets the stream that fired
+                                          - lambda: id(va).select_stream(stream);
+                                          - voice_assistant.start:
+                                              wake_word: !lambda return wake_word;
   - id: night_mode_enter
     mode: queued
     then:
@@ -1628,6 +1788,15 @@ script:
             set("Breathe 1.2s", 1.0, 1.0, 1.0);      // white pulse
             return;
           }
+          // TEST (intercom): green = a call
+          if (id(phone).is_ringing()) {              // Incoming call ringing
+            set("Breathe 1.2s", 0.0, 1.0, 0.3);      // green pulse
+            return;
+          }
+          if (id(phone).is_calling()) {              // Calling out, the other side ringing
+            set("Spin", 0.0, 1.0, 0.3);              // green, two spokes clockwise
+            return;
+          }
 
           // Voice assistant phases
           switch (phase) {
@@ -1655,6 +1824,12 @@ script:
             default: break;
           }
 
+          // TEST (intercom): in a call (the voice assistant phases above win while it runs)
+          if (id(phone).is_in_call()) {
+            set("solid", 0.0, 0.6, 0.2);             // steady green
+            return;
+          }
+
           // Timers ticking: countdown of the first timer on the ring
           if (timers_active) {
             id(fetch_first_active_timer).execute();
@@ -1678,6 +1853,46 @@ script:
           b: 1.0
       - delay: 1.2s
       - script.execute: control_leds
+
+  # TEST (intercom): incoming call ringing. With auto answer the call opens at once
+  # (on_in_call follows); otherwise the ring sound repeats and "Stop" is listened for.
+  - id: call_ring_start
+    then:
+      - if:
+          condition:
+            lambda: return !id(phone).is_auto_answer();
+          then:
+            - micro_wake_word.enable_model: stop
+            - micro_wake_word.enable_model: stop_b
+            - micro_wake_word.enable_model: stop_c
+            - mixer_speaker.apply_ducking:
+                id: media_mixing_input
+                decibel_reduction: 10
+                duration: 0.0s
+            - script.execute: enable_repeat_one
+            - script.execute:
+                id: play_sound
+                priority: true
+                sound_file: "timer_finished_sound"
+      - script.execute: control_leds
+
+  - id: call_ring_stop
+    then:
+      - if:
+          condition:
+            switch.is_off: timer_ringing
+          then:
+            - micro_wake_word.disable_model: stop
+            - micro_wake_word.disable_model: stop_b
+            - micro_wake_word.disable_model: stop_c
+            - script.execute: disable_repeat
+            - if:
+                condition:
+                  media_player.is_announcing: external_media_player
+                then:
+                  media_player.stop:
+                    id: external_media_player
+                    announcement: true
 
   # Timer sound handling
   - id: ring_timer
@@ -1797,7 +2012,7 @@ script:
                 timeout: 10min  # the phase follows the real end of the reply (on_end)
             - if:
                 condition:
-                  switch.is_off: timer_ringing
+                  lambda: return !id(timer_ringing).state && !id(phone).is_ringing();
                 then:
                   - micro_wake_word.disable_model: stop
                   - micro_wake_word.disable_model: stop_b
@@ -2010,16 +2225,30 @@ switch:
     turn_off_action:
       - script.execute: night_mode_exit
 
+  # TEST (intercom): answer incoming calls without the wake word; refuse calls
+  - platform: voip_stack
+    voip_stack_id: phone
+    auto_answer:
+      name: "Intercom auto answer"
+      entity_category: config
+    dnd:
+      name: "Intercom do not disturb"
+      entity_category: config
+
   - platform: template
     id: timer_ringing
     optimistic: true
     internal: true
     restore_mode: ALWAYS_OFF
     on_turn_off:
-      - micro_wake_word.disable_model: stop
-      - micro_wake_word.disable_model: stop_b
-      - micro_wake_word.disable_model: stop_c
-      - script.execute: disable_repeat
+      - if:
+          condition:
+            lambda: return !id(phone).is_ringing();  # TEST (intercom): "Stop" declines a ringing call
+          then:
+            - micro_wake_word.disable_model: stop
+            - micro_wake_word.disable_model: stop_b
+            - micro_wake_word.disable_model: stop_c
+            - script.execute: disable_repeat
       - if:
           condition:
             media_player.is_announcing: external_media_player
@@ -2029,12 +2258,20 @@ switch:
               announcement: true
       - mixer_speaker.apply_ducking:
           id: media_mixing_input
+          decibel_reduction: !lambda 'return id(phone).is_active() ? 20 : 0;'  # a call keeps music down
+          duration: 1.0s
+      - mixer_speaker.apply_ducking:
+          id: call_mixing_input
           decibel_reduction: 0
           duration: 1.0s
       - script.execute: control_leds
     on_turn_on:
       - mixer_speaker.apply_ducking:
           id: media_mixing_input
+          decibel_reduction: 10
+          duration: 0.0s
+      - mixer_speaker.apply_ducking:
+          id: call_mixing_input
           decibel_reduction: 10
           duration: 0.0s
       - micro_wake_word.enable_model: stop
@@ -2381,14 +2618,21 @@ binary_sensor:
       number: 10
       inverted: true
     on_press:
+      # TEST (intercom): in a call or calling out -> hang up
       # A timer or alarm is ringing -> Play/Pause silences it (works even when muted)
       - if:
           condition:
-            switch.is_on: timer_ringing
+            lambda: return id(phone).is_in_call() || id(phone).is_calling();
           then:
-            - switch.turn_off: timer_ringing
+            - voip_stack.stop: phone
           else:
-            - media_player.toggle: external_media_player
+            - if:
+                condition:
+                  switch.is_on: timer_ringing
+                then:
+                  - switch.turn_off: timer_ringing
+                else:
+                  - media_player.toggle: external_media_player
 
   - platform: gpio
     name: "Key3"
