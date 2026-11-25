@@ -4,6 +4,9 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.25
 
+- **.5** (TEST, branch intercom) Resampler task stacks (announcement, media, call; 3 KB
+  each while running) in PSRAM. Diagnostic: internal RAM logged at each call stage
+  (ringing, calling, connected, every 10 s in a call, idle, idle + 10 s).
 - **.4** (TEST, branch intercom) Intercom on top of .3 (urgent-only announcement boost:
   a failed-call message now plays at reply level). The intercom changes are now in
   esphome-va-1.yaml on the branch (the test file handed out is a copy with friendly

@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.25.4"
+  fw_version: "2026.11.25.5"
 
   # ---- Intercom (TEST, branch intercom) ----------------------------------------
   # Static contacts, the same on every board. The HA automation maps spoken forms
@@ -834,16 +834,21 @@ speaker:
         timeout: never
 
   # Virtual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
+  # Resampler task stacks (3 KB each, while the resampler runs) in PSRAM: internal RAM
+  # is the scarce one
   - platform: resampler
     id: announcement_resampling_speaker
     output_speaker: announcement_mixing_input
+    task_stack_in_psram: true
   - platform: resampler
     id: media_resampling_speaker
     output_speaker: media_mixing_input
+    task_stack_in_psram: true
   - platform: resampler
     id: call_resampling_speaker
     output_speaker: call_mixing_input
     bits_per_sample: 16  # stated: voip_stack reads the format from its speaker
+    task_stack_in_psram: true
 
 # TEST (intercom): calls between the satellites, board to board (SIP over UDP, RTP
 # with 16 kHz 16-bit mono PCM). Sends the AFE output (echo-cancelled); the other side
@@ -912,9 +917,11 @@ voip_stack:
       internal: true
   on_ringing:  # incoming call
     - lambda: id(call_outgoing) = false;
+    - script.execute: {id: call_ram_log, stage: "ringing"}
     - script.execute: call_ring_start
   on_calling:  # outgoing call
     - lambda: id(call_outgoing) = true;
+    - script.execute: {id: call_ram_log, stage: "calling"}
     - script.execute: control_leds
   # An outgoing call that did not connect: Home Assistant says why on this satellite
   # (the intercom automation, event trigger). Needs "Allow the device to perform Home
@@ -930,6 +937,7 @@ voip_stack:
                 contact: !lambda return peer;
                 reason: !lambda return reason;
   on_in_call:
+    - script.execute: {id: call_ram_log, stage: "connected"}
     - script.execute: call_ring_stop
     - mixer_speaker.apply_ducking:
         id: media_mixing_input
@@ -937,6 +945,8 @@ voip_stack:
         duration: 0.5s
     - script.execute: control_leds
   on_idle:
+    - script.execute: {id: call_ram_log, stage: "idle"}
+    - script.execute: call_ram_idle_later
     - script.execute: call_ring_stop
     - if:
         condition:
@@ -1854,6 +1864,22 @@ script:
       - delay: 1.2s
       - script.execute: control_leds
 
+  # TEST (intercom, diagnostic): internal RAM at each call stage
+  - id: call_ram_log
+    mode: queued
+    parameters:
+      stage: string
+    then:
+      - lambda: |-
+          ESP_LOGI("intercom", "RAM %s: internal free %u, largest block %u", stage.c_str(),
+                   (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                   (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  - id: call_ram_idle_later  # once things have settled after a call
+    mode: restart
+    then:
+      - delay: 10s
+      - script.execute: {id: call_ram_log, stage: "idle + 10 s"}
+
   # TEST (intercom): incoming call ringing. With auto answer the call opens at once
   # (on_in_call follows); otherwise the ring sound repeats and "Stop" is listened for.
   - id: call_ring_start
@@ -2645,6 +2671,14 @@ binary_sensor:
       - media_player.volume_up: external_media_player
 
 interval:
+  # TEST (intercom, diagnostic): internal RAM every 10 s while a call is on
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: return !id(phone).is_idle();
+          then:
+            - script.execute: {id: call_ram_log, stage: "in call"}
   # mww_b and mww_c follow mww: the wake words Home Assistant enabled, and the cutoffs
   # set by the Wake word sensitivity select (stop is switched on all directly)
   - interval: 1s
