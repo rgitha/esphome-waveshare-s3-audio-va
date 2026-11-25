@@ -111,14 +111,14 @@ the total capped at 0 dBFS. No ESPHome core changes.
 | What is playing | Boost |
 |---|---|
 | VA reply | 0 dB (the reference: the slider sets reply loudness) |
-| Announcement | `announcement_boost_db`, HA number −6 to +6 dB in 3 dB steps, default +6 |
-| Music | `music_boost_db`, same range, default +6 |
-| Urgent announcement | `urgent_boost_db`, set by the `urgent_announcement` action for the next announcement only |
-| Announcement over music | Announcement boost (music is ducked 10 dB anyway) |
+| Announcement | 0 dB, like a reply |
+| Urgent announcement | `announcement_boost_db`, HA number 0 to +12 dB in 3 dB steps, default +12; for the next announcement after the `urgent_announcement` action (within 10 s) |
+| Music | `music_boost_db`, HA number −6 to +6 dB in 3 dB steps, default +6 |
+| Urgent announcement over music | Announcement boost (music is ducked 10 dB anyway) |
 
-The clamp with +6 dB announcement boost:
+The clamp with a +6 dB boost (urgent announcement or music):
 
-| Media player volume | Reply | Announcement | Effective boost |
+| Media player volume | Reply | Boosted | Effective boost |
 |---|---|---|---|
 | −20 dB | −20 dB | −14 dB | +6 dB |
 | −6 dB | −6 dB | 0 dB | +6 dB |

@@ -97,10 +97,10 @@ trim. Switch "Adaptive volume reduction", sensor "Adaptive reduction level".
 Diagnostics: Room noise and Echo reduction (enabled); Speaker path gain (and per
 reply) disabled by default.
 
-**Boosts.** HA announcements and music play louder than replies by an
-"Announcement boost" and a "Music boost" (HA, −6..+6 dB in 3 dB steps, default
-+6); the `urgent_announcement` action adds `urgent_boost_db` (6) to the next
-announcement. The boost is added in the audio stack's output gain after the
+**Boosts.** Music plays louder than replies by the "Music boost" (HA, −6..+6 dB
+in 3 dB steps, default +6). An HA announcement plays at the reply level, unless
+the `urgent_announcement` action was called just before it (within 10 s): then it
+gets the "Announcement boost" (HA, 0..12 dB in 3 dB steps, default +12). The boost is added in the audio stack's output gain after the
 mixer (stack fork, `set_output_boost_db()`): total = media player volume +
 adaptive reduction + boost, capped at 0 dBFS, so near full volume a boost has
 less effect. Independent of adaptive volume. Replies, chimes and timers get none.

@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.23.4"
+  fw_version: "2026.11.25.3"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -27,11 +27,10 @@ substitutions:
   # Boosts over the media player volume (the reply level), applied by the audio stack
   # after the mixer; the total is capped at 0 dBFS, so near full volume a boost has
   # less effect. Independent of adaptive volume. Announcement and music boosts are HA
-  # settings (-6..+6 dB, 3 dB steps); these are their first-boot values. Chimes,
-  # replies and timers/alarms get no boost.
-  announcement_boost_db: "6"  # HA announcements (assist_satellite.announce, with the pre-announcement chime)
-  music_boost_db: "6"         # music (http media and Sendspin)
-  urgent_boost_db: "6"        # extra, for the next announcement after the urgent_announcement action
+  # settings; these are their first-boot values. Chimes, replies, timers/alarms and
+  # ordinary HA announcements get no boost.
+  announcement_boost_db: "12" # an HA announcement called with urgent_announcement just before (0..12 dB)
+  music_boost_db: "6"         # music (http media and Sendspin), -6..+6 dB
   max_attenuation_db: "30"    # largest adaptive reduction
   # Volume range (each used in two places, so they cannot drift apart)
   master_volume_min_db: "-40" # codec master volume floor (audio stack and adaptive volume)
@@ -248,8 +247,8 @@ api:
                 id(saved_alarm_time) = alarm_time_hh_mm;
               }
     # Urgent announcement: call just before assist_satellite.announce; the
-    # next HA announcement within 10 s gets urgent_boost_db on top of the
-    # announcement boost.
+    # next HA announcement within 10 s gets the announcement boost (other
+    # announcements get none).
     - action: urgent_announcement
       then:
         - lambda: |-
@@ -1170,15 +1169,15 @@ voice_assistant:
           - script.execute: control_leds
   on_tts_start:
     # TTS without a run = HA announcement (assist_satellite.announce): the
-    # announcement boost until on_end, plus urgent_boost_db if urgent_announcement
-    # was called in the last 10 s.
+    # announcement boost until on_end, only if urgent_announcement was called in
+    # the last 10 s (the window only drops a flag left from a missed announcement).
     - lambda: |-
         if (!id(va_run_active)) {
-          float boost = id(announcement_boost).state;
-          if (id(urgent_pending) && millis() - id(urgent_set_ms) < 10000) boost += ${urgent_boost_db};
+          if (id(urgent_pending) && millis() - id(urgent_set_ms) < 10000) {
+            id(announcement_boost_now) = id(announcement_boost).state;
+            id(announcement_boost_active) = true;
+          }
           id(urgent_pending) = false;
-          id(announcement_boost_now) = boost;
-          id(announcement_boost_active) = true;
         }
     - script.execute: update_boost
     - if:
@@ -1393,7 +1392,7 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: announcement_boost_now # its boost, dB (announcement boost + urgent)
+  - id: announcement_boost_now # its boost, dB (the announcement boost, urgent announcements only)
     type: float
     restore_value: no
     initial_value: '0'
@@ -2152,8 +2151,8 @@ number:
     unit_of_measurement: dB
     optimistic: true
     restore_value: true
-    min_value: -6
-    max_value: 6
+    min_value: 0
+    max_value: 12
     step: 3
     initial_value: ${announcement_boost_db}
     mode: slider

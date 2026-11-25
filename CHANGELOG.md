@@ -2,6 +2,14 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.25
+
+- **.3** Announcement boost only for urgent announcements: an HA announcement plays at
+  the reply level unless the urgent_announcement action was called within 10 s before
+  it; then it gets the "Announcement boost" (now 0..12 dB, default +12; was −6..+6 for
+  every announcement, plus urgent_boost_db 6 for urgent ones; urgent_boost_db removed).
+  Music boost unchanged. (.1-.2: intercom test builds, branch intercom.)
+
 ## 2026.11.23
 
 - **.4** Decoder task stacks of the audio_file and audio_http media sources in PSRAM
