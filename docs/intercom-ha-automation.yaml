@@ -15,7 +15,8 @@
 #
 # Voice: "Okay Nabu, call VA2" (also "ring", "phone") on a satellite -> it calls VA2;
 #   "end the call" / "hang up" -> it hangs up. A call that does not connect -> the
-#   calling satellite says why ("VA2 didn't answer").
+#   calling satellite says why ("VA2 didn't answer"); a connected call lost (the other
+#   side silent for 15 s, e.g. switched off) -> both satellites say "Lost the call with VA2".
 #
 # Per board, once: Settings -> Devices & services -> ESPHome -> the device ->
 #   Configure -> "Allow the device to perform Home Assistant actions" (for its events),
@@ -52,6 +53,7 @@ variables:
     timeout: "{contact} didn't answer."
     busy: "{contact} is busy."
     declined: "{contact} declined the call."
+    lost: "Lost the call with {contact}."
   # All boards from their "Intercom endpoint" entities: [{contact, node, ip, device}]
   boards: >-
     {% set ns = namespace(l=[]) %}
@@ -91,7 +93,7 @@ actions:
                       {% endfor %}
                       {{ {'contacts': ns.c, 'complete': true} | to_json }}
 
-      # ---- A call that did not connect: say why on the calling satellite ----
+      # ---- A call that did not connect, or was lost: say why on the satellite ----
       - conditions:
           - condition: trigger
             id: failed
@@ -100,9 +102,22 @@ actions:
               satellite: >-
                 {{ device_entities(trigger.event.data.device_id | default(''))
                    | select('match', 'assist_satellite\\.') | first | default('') }}
+              # the board sends the contact name (VA2) or, after the call connected, the
+              # other board's name in HA ("Voice Assistant 2 Intercom"): both -> VA2
+              peer: "{{ trigger.event.data.contact | default('') | string }}"
+              contact: >-
+                {% set ns = namespace(c='') %}
+                {% for b in boards %}
+                  {% if peer and peer | lower in [b.contact | lower,
+                                         (device_attr(b.device, 'name_by_user') or '') | lower,
+                                         (device_attr(b.device, 'name') or '') | lower] %}
+                    {% set ns.c = b.contact %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.c or peer or 'the other side' }}
               message: >-
                 {{ reasons.get(trigger.event.data.reason, "The call to {contact} didn't go through.")
-                   | replace('{contact}', trigger.event.data.contact | default('the other side')) }}
+                   | replace('{contact}', contact) }}
           - if:
               - condition: template
                 value_template: "{{ satellite != '' }}"

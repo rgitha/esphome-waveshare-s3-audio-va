@@ -4,6 +4,10 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.26
 
+- **.2** (TEST, branch intercom) A connected call that is lost (the other side silent
+  for 15 s, e.g. switched off) is announced on both satellites: "Lost the call with
+  VA2" (was "The call to Voice Assistant 2 Intercom didn't go through", on the caller
+  only). The automation maps the other board's HA name back to its contact name.
 - **.1** (TEST, branch intercom) Phonebook from Home Assistant: no contacts or IPs in
   the YAML. Each board reports contact|node|IP in a diagnostic "Intercom endpoint"
   entity and sends esphome.intercom_online when HA connects; the intercom automation

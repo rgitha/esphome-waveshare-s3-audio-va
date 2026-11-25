@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.26.1"
+  fw_version: "2026.11.26.2"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -916,30 +916,39 @@ voip_stack:
     conference_ring:
       internal: true
   on_ringing:  # incoming call
-    - lambda: id(call_outgoing) = false;
+    - lambda: |-
+        id(call_outgoing) = false;
+        id(call_connected) = false;
     - script.execute: {id: call_ram_log, stage: "ringing"}
     - script.execute: call_ring_start
   on_calling:  # outgoing call: "Stop" cancels it until it connects
-    - lambda: id(call_outgoing) = true;
+    - lambda: |-
+        id(call_outgoing) = true;
+        id(call_connected) = false;
     - script.execute: {id: call_ram_log, stage: "calling"}
     - micro_wake_word.enable_model: stop
     - micro_wake_word.enable_model: stop_b
     - micro_wake_word.enable_model: stop_c
     - script.execute: control_leds
-  # An outgoing call that did not connect: Home Assistant says why on this satellite
-  # (the intercom automation, event trigger). Needs "Allow the device to perform Home
-  # Assistant actions" on for this device in HA's ESPHome integration.
+  # An outgoing call that did not connect, or a connected call lost on either side
+  # (reason "lost", e.g. no audio from the other side for 15 s): Home Assistant says
+  # why on this satellite (the intercom automation, event trigger). Needs "Allow the
+  # device to perform Home Assistant actions" on for this device in HA's ESPHome
+  # integration. contact: the contact name before the call connects, the other
+  # board's name after; the automation maps both.
   on_call_failed:
     - if:
         condition:
-          lambda: return id(call_outgoing) && reason != "cancelled";
+          lambda: return id(call_connected) || (id(call_outgoing) && reason != "cancelled");
         then:
           - homeassistant.event:
               event: esphome.intercom_call_failed
               data:
                 contact: !lambda return peer;
-                reason: !lambda return reason;
+                reason: !lambda 'return id(call_connected) ? std::string("lost") : reason;'
+    - lambda: id(call_connected) = false;
   on_in_call:
+    - lambda: id(call_connected) = true;
     - script.execute: {id: call_ram_log, stage: "connected"}
     - script.execute: call_ring_stop
     - script.execute: call_connect_flash
@@ -951,6 +960,7 @@ voip_stack:
   # A call ended or was declined: stop the ring at once (not only at idle; a decline
   # can wait in "terminating" for the other side's confirmation)
   on_hangup:
+    - lambda: id(call_connected) = false;
     - script.execute: call_ring_stop
     - script.execute: control_leds
   on_idle:
@@ -1460,6 +1470,10 @@ voice_assistant:
 globals:
   # TEST (intercom): the current or last call was started here
   - id: call_outgoing
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: call_connected  # the current call connected (a failure after this is "lost")
     type: bool
     restore_value: no
     initial_value: 'false'
