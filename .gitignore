@@ -1,3 +1,5 @@
 secrets.yaml
 .esphome/
 *.wav
+__pycache__/
+*.pyc
