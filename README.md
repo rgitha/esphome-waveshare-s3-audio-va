@@ -11,7 +11,6 @@ ESPHome Home Assistant voice satellite for the Waveshare ESP32-S3-AUDIO-Board.
 | `components/voice_assistant/` | ESPHome's voice_assistant with the wake-word pre-roll and STT stream selection |
 | `components/micro_wake_word/` | ESPHome's micro_wake_word allowing several instances (wake word on each BSS stream) |
 | `patches/` | The changes in both copies as patches against ESPHome (`BASE`), and `regen.sh` |
-| `docs/` | Audio stack forks and design; dual wake word findings |
 
 The YAML needs ESPHome 2026.10 or later and a `secrets.yaml` with `wifi_ssid`,
 `wifi_password` and `api_key_esp32_audio_board` (ignored by git). Tunables are
@@ -30,8 +29,7 @@ it from the copy. Needs bash and git.
 ## Design notes
 
 **Audio path.** [esphome-audio-stack](https://github.com/rgitha/esphome-audio-stack)
-(fork of n-IA-hane/esphome-audio-stack, see
-[docs/audio-stack-forks.md](docs/audio-stack-forks.md)) runs the ES7210 mics and
+(fork of n-IA-hane/esphome-audio-stack) runs the ES7210 mics and
 the ES8311 codec as 48 kHz 4-slot TDM: slot 0 right mic, 2 left mic, 1 speaker
 reference. Espressif's AFE (type `sr`, `low_cost`, AGC off) does echo
 cancellation and dual-mic separation (BSS). Its output (the unseparated,
@@ -47,8 +45,7 @@ at 1; the trim already sets the level for both.
 
 **Direction of arrival.** A test on branch `doa-probe` estimates the talker's
 direction from the two mics (about ±5° ahead, 10-15° to the sides); left there, as 7
-LEDs are too coarse to show it well. See
-[docs/doa-probe.md](https://github.com/rgitha/esphome-waveshare-s3-audio-va/blob/doa-probe/docs/doa-probe.md).
+LEDs are too coarse to show it well.
 
 **Wake words.** okay_nabu and hey_jarvis, plus "stop" (cutoff 0.75; 0.50
 false-triggered on residual TTS echo). One micro_wake_word instance on each
@@ -56,8 +53,7 @@ separated stream (raw 0 on core 0, raw 1 on core 1, 500 ms audio buffer); with a
 talker or TV in the room, one of them usually keeps the voice when the
 unseparated output does not. The first detection acts, and STT gets the stream
 that fired, with that stream's pre-roll; continued conversation keeps the last
-stream, a start without a wake word uses the output. Findings and CPU figures:
-[docs/dual-wake-word.md](docs/dual-wake-word.md). Fixed test parameters (AFE mode,
+stream, a start without a wake word uses the output. Fixed test parameters (AFE mode,
 echo filter length, AFE VAD, which instances run) are at the end of the
 substitutions. "Stop" is on from the end of a command
 until its reply has played, and while a timer rings. Saying it while a reply
@@ -104,7 +100,6 @@ gets the "Announcement boost" (HA, 0..12 dB in 3 dB steps, default +12). The boo
 mixer (stack fork, `set_output_boost_db()`): total = media player volume +
 adaptive reduction + boost, capped at 0 dBFS, so near full volume a boost has
 less effect. Independent of adaptive volume. Replies, chimes and timers get none.
-See [docs/audio-stack-forks.md](docs/audio-stack-forks.md).
 
 **Sendspin.** Synchronized multi-room audio as on Voice PE. The ES8311 output
 delay is unknown, so the Sendspin static delay is adjustable from the server.
