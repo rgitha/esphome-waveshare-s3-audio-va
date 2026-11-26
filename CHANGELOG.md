@@ -54,7 +54,7 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 - **.1** (TEST, branch intercom) Intercom between the satellites with n-IA-hane's VoIP
   Stack (voip_stack v2026.11.0): SIP calls and 16 kHz PCM audio board to board, static
   contacts VA1 and VA2. Calls start and end by voice through Home Assistant
-  (docs/intercom-ha-automation.yaml); a ringing call is answered with the wake word and
+  (home-assistant/intercom-automation.yaml); a ringing call is answered with the wake word and
   declined with "Stop"; Key2 hangs up. Call audio on its own mixer input (ducked like
   music by replies, announcements and timers); music 20 dB down during a call. Green
   LEDs for calls. Auto answer and do-not-disturb switches. Adaptive volume treats a call
