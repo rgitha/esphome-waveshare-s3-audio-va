@@ -29,6 +29,8 @@ CONF_ON_STT_END = "on_stt_end"
 CONF_ON_STT_VAD_END = "on_stt_vad_end"
 CONF_ON_STT_VAD_START = "on_stt_vad_start"
 CONF_ON_TTS_END = "on_tts_end"
+CONF_ON_ANNOUNCEMENT_HELD = "on_announcement_held"
+CONF_HELD_ANNOUNCEMENTS_MAX = "held_announcements_max"
 CONF_ON_TTS_START = "on_tts_start"
 CONF_ON_TTS_STREAM_START = "on_tts_stream_start"
 CONF_ON_TTS_STREAM_END = "on_tts_stream_end"
@@ -144,6 +146,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ON_STT_END): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_TTS_START): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_TTS_END): automation.validate_automation(single=True),
+            # local addition: an announcement held (set_hold_announcements); x = its text
+            cv.Optional(CONF_ON_ANNOUNCEMENT_HELD): automation.validate_automation(single=True),
+            cv.Optional(CONF_HELD_ANNOUNCEMENTS_MAX, default=3): cv.int_range(min=1, max=10),
             cv.Optional(CONF_ON_END): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_ERROR): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_CLIENT_CONNECTED): automation.validate_automation(
@@ -301,6 +306,11 @@ async def to_code(config: ConfigType) -> None:
             config[CONF_ON_TTS_START],
         )
 
+    cg.add(var.set_held_announcements_max(config[CONF_HELD_ANNOUNCEMENTS_MAX]))
+    if CONF_ON_ANNOUNCEMENT_HELD in config:
+        await automation.build_automation(
+            var.get_announcement_held_trigger(), [(cg.std_string, "x")], config[CONF_ON_ANNOUNCEMENT_HELD]
+        )
     if CONF_ON_TTS_END in config:
         await automation.build_automation(
             var.get_tts_end_trigger(), [(cg.std_string, "x")], config[CONF_ON_TTS_END]

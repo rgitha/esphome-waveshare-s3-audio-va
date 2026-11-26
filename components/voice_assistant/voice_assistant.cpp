@@ -648,6 +648,10 @@ void VoiceAssistant::loop() {
           ESP_LOGD(TAG, "Announcement finished playing");
           this->set_state_(State::RESPONSE_FINISHED, State::RESPONSE_FINISHED);
 
+          if (this->suppress_announce_finished_) {
+            this->suppress_announce_finished_ = false;  // released announcements: HA is not waiting
+            break;
+          }
           api::VoiceAssistantAnnounceFinished msg;
           msg.success = true;
           if (!this->api_client_->send_message(msg)) {
@@ -928,7 +932,7 @@ void VoiceAssistant::start_playback_timeout_() {
     this->cancel_timeout("speaker-timeout");
     this->set_state_(State::RESPONSE_FINISHED, State::RESPONSE_FINISHED);
 
-    if (this->api_client_ == nullptr)
+    if (this->api_client_ == nullptr || this->suppress_announce_finished_)
       return;
     api::VoiceAssistantAnnounceFinished msg;
     msg.success = true;
@@ -1234,33 +1238,75 @@ void VoiceAssistant::timer_tick_() {
 
 void VoiceAssistant::on_announce(const api::VoiceAssistantAnnounceRequest &msg) {
 #ifdef USE_MEDIA_PLAYER
-  if (this->media_player_ != nullptr) {
-    this->tts_start_trigger_.trigger(msg.text);
-
-    this->media_player_response_state_ = MediaPlayerResponseState::URL_SENT;
-
-    if (!msg.preannounce_media_id.empty()) {
-      this->media_player_->make_call().set_media_url(msg.preannounce_media_id).set_announcement(true).perform();
+  if (this->media_player_ == nullptr)
+    return;
+  if (this->hold_announcements_) {
+    if (this->held_.size() >= this->held_max_) {
+      ESP_LOGW(TAG, "Held announcements full (%u): oldest dropped", (unsigned) this->held_max_);
+      this->held_.erase(this->held_.begin());
     }
-    // Enqueueing a URL with an empty playlist will still play the file immediately
-    this->media_player_->make_call()
-        .set_command(media_player::MEDIA_PLAYER_COMMAND_ENQUEUE)
-        .set_media_url(msg.media_id)
-        .set_announcement(true)
-        .perform();
-    this->continue_conversation_ = msg.start_conversation;
-
-    this->start_playback_timeout_();
-
-    if (this->continuous_) {
-      this->set_state_(State::STOP_MICROPHONE, State::STREAMING_RESPONSE);
-    } else {
-      this->set_state_(State::STREAMING_RESPONSE, State::STREAMING_RESPONSE);
+    this->held_.push_back({msg.media_id, msg.preannounce_media_id, msg.text});
+    ESP_LOGI(TAG, "Announcement held (%u waiting)%s", (unsigned) this->held_.size(),
+             msg.start_conversation ? "; its conversation is dropped" : "");
+    // Home Assistant waits for the end of the announcement: it has been taken
+    if (this->api_client_ != nullptr) {
+      api::VoiceAssistantAnnounceFinished fin;
+      fin.success = true;
+      if (!this->api_client_->send_message(fin)) {
+        API_LOG_MSG_DROPPED(TAG, "Announce-finished");
+      }
     }
-
-    this->tts_end_trigger_.trigger(msg.media_id);
-    this->end_trigger_.trigger();
+    this->announcement_held_trigger_.trigger(msg.text);
+    return;
   }
+  this->play_announcement_(msg.media_id, msg.preannounce_media_id, msg.text, msg.start_conversation, false);
+#endif
+}
+
+void VoiceAssistant::release_held_announcements() {
+#ifdef USE_MEDIA_PLAYER
+  if (this->held_.empty() || this->media_player_ == nullptr)
+    return;
+  ESP_LOGI(TAG, "Playing %u held announcement(s)", (unsigned) this->held_.size());
+  this->suppress_announce_finished_ = true;
+  for (auto &a : this->held_)
+    this->play_announcement_(a.media_id, a.preannounce_media_id, a.text, false, true);  // all queued, in order
+  this->held_.clear();
+#endif
+}
+
+void VoiceAssistant::play_announcement_(const std::string &media_id, const std::string &preannounce_media_id,
+                                        const std::string &text, bool start_conversation, bool queue_all) {
+#ifdef USE_MEDIA_PLAYER
+  this->tts_start_trigger_.trigger(text);
+
+  this->media_player_response_state_ = MediaPlayerResponseState::URL_SENT;
+
+  if (!preannounce_media_id.empty()) {
+    // as upstream: the pre-announcement sound starts at once; released ones queue
+    auto call = this->media_player_->make_call();
+    if (queue_all)
+      call.set_command(media_player::MEDIA_PLAYER_COMMAND_ENQUEUE);
+    call.set_media_url(preannounce_media_id).set_announcement(true).perform();
+  }
+  // Enqueueing a URL with an empty playlist will still play the file immediately
+  this->media_player_->make_call()
+      .set_command(media_player::MEDIA_PLAYER_COMMAND_ENQUEUE)
+      .set_media_url(media_id)
+      .set_announcement(true)
+      .perform();
+  this->continue_conversation_ = start_conversation;
+
+  this->start_playback_timeout_();
+
+  if (this->continuous_) {
+    this->set_state_(State::STOP_MICROPHONE, State::STREAMING_RESPONSE);
+  } else {
+    this->set_state_(State::STREAMING_RESPONSE, State::STREAMING_RESPONSE);
+  }
+
+  this->tts_end_trigger_.trigger(media_id);
+  this->end_trigger_.trigger();
 #endif
 }
 

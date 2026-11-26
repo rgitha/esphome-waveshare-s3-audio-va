@@ -177,6 +177,16 @@ class VoiceAssistant final : public Component {
   void on_audio(const api::VoiceAssistantAudio &msg);
   void on_timer_event(const api::VoiceAssistantTimerEventResponse &msg);
   void on_announce(const api::VoiceAssistantAnnounceRequest &msg);
+
+  // Local addition: hold announcements (e.g. during an intercom call). While held, an
+  // announcement from Home Assistant is queued (up to max, the oldest dropped) and Home
+  // Assistant is told it finished; release_held_announcements() plays the queue.
+  void set_hold_announcements(bool hold) { this->hold_announcements_ = hold; }
+  bool is_holding_announcements() const { return this->hold_announcements_; }
+  void set_held_announcements_max(size_t max) { this->held_max_ = max; }
+  size_t held_announcements() const { return this->held_.size(); }
+  void release_held_announcements();
+  Trigger<std::string> *get_announcement_held_trigger() { return &this->announcement_held_trigger_; }
   void on_set_configuration(const std::vector<std::string> &active_wake_words);
   const Configuration &get_configuration();
 
@@ -398,6 +408,19 @@ class VoiceAssistant final : public Component {
   bool continuous_{false};
   bool silence_detection_;
   bool continue_conversation_{false};
+
+  struct HeldAnnouncement {
+    std::string media_id;
+    std::string preannounce_media_id;
+    std::string text;
+  };
+  bool hold_announcements_{false};
+  size_t held_max_{3};
+  std::vector<HeldAnnouncement> held_;
+  bool suppress_announce_finished_{false};  // released announcements: HA is not waiting
+  Trigger<std::string> announcement_held_trigger_;
+  void play_announcement_(const std::string &media_id, const std::string &preannounce_media_id,
+                          const std::string &text, bool start_conversation, bool queue_all);
   bool udp_socket_running_{false};
 };
 
