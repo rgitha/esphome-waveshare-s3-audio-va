@@ -14,7 +14,8 @@
 #     "Intercom names", max length 255.)
 #
 # Voice: "Okay Nabu, call VA2" (also "ring", "phone") on a satellite -> it calls VA2;
-#   "hang up" / "end the call" -> it hangs up ("No ongoing call." when there is none).
+#   In a call there is no assistant: "Okay Nabu" hangs up on the board itself, so
+#   "hang up" / "end the call" only reaches here outside a call ("No ongoing call.").
 #   A muted microphone in a call -> the other satellite shows it (slow cyan comet).
 #   A call that does not connect -> the
 #   calling satellite says why ("VA2 didn't answer"); a connected call lost (the other

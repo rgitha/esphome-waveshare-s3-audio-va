@@ -4,6 +4,14 @@ Firmware versions (`fw_version`, year.month.day.build), newest first.
 
 ## 2026.11.26
 
+- **.4** (TEST, branch intercom) Call mode, from ringing or calling until the call
+  is over: no voice assistant. A wake word answers a ringing call, cancels an outgoing
+  one and hangs up a connected one ("Stop" still declines or cancels). Announcements
+  from Home Assistant are held (up to 3, the oldest dropped) and a timer that finishes
+  waits; one beep, then a beep every 10 s, and the pilot warm white (alternating with
+  amber when muted). After the call: the timer rings until dismissed, then the held
+  announcements play, then paused music resumes (music pauses for the call).
+  Diagnostic: failed allocations show the function, RAM lines the DMA-capable RAM.
 - **.3** (TEST, branch intercom) An unanswered call ends after 30 s on the caller
   (which tells the other side), and the called board stops ringing by itself after
   35 s; the ring stops at once when the caller cancels. "Hang up" / "end the call" with

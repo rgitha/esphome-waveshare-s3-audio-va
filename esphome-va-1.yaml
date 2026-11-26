@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.26.3"
+  fw_version: "2026.11.26.4"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -58,7 +58,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: b2a8442ca769f15a928fb7777f53725a9dc4bf35
+  repo_ref: 588d1ca7ad82cd349e0a308d2f1f9cd1a3e4b4dd
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -135,6 +135,7 @@ esphome:
             heap_caps_register_failed_alloc_callback([](size_t size, uint32_t caps, const char *fn) {
               id(alloc_fail_size) = size;
               id(alloc_fail_caps) = caps;
+              id(alloc_fail_fn) = fn;
               id(alloc_fail_count) = id(alloc_fail_count) + 1;
             });
     - priority: 375
@@ -640,9 +641,17 @@ light:
               default: live(scene, ms_since(now, live0), out);
             }
 
-            // TEST (intercom): microphone muted during a call: the pilot amber at the ring's
-            // level, over whatever the ring shows
-            if (id(mic_is_muted) && !id(phone).is_idle()) out[P0] = Col{1.0f, 0.5f, 0.0f};
+            // TEST (intercom), call mode, the pilot at the ring's level over whatever the ring
+            // shows: amber = microphone muted, warm white = something waiting for the end of
+            // the call (timer, announcements); both: alternating every second
+            if (!id(phone).is_idle()) {
+              const bool waiting = id(call_timer_pending) || id(va).held_announcements() > 0;
+              const bool muted = id(mic_is_muted);
+              const Col AMBER{1.0f, 0.5f, 0.0f}, WARM{1.0f, 0.70f, 0.35f};
+              if (waiting && muted) out[P0] = (millis() / 1000) % 2 ? WARM : AMBER;
+              else if (waiting) out[P0] = WARM;
+              else if (muted) out[P0] = AMBER;
+            }
 
             // ---- output: the light applies the ring brightness (current_color) and the gamma ----
             const float b = std::max(current_color.r, std::max(current_color.g, current_color.b)) / 255.0f;
@@ -947,12 +956,14 @@ voip_stack:
     - lambda: |-
         id(call_outgoing) = false;
         id(call_connected) = false;
+    - script.execute: call_mode_start
     - script.execute: {id: call_ram_log, stage: "ringing"}
     - script.execute: call_ring_start
   on_calling:  # outgoing call: "Stop" cancels it until it connects
     - lambda: |-
         id(call_outgoing) = true;
         id(call_connected) = false;
+    - script.execute: call_mode_start
     - script.execute: {id: call_ram_log, stage: "calling"}
     - micro_wake_word.enable_model: stop
     - micro_wake_word.enable_model: stop_b
@@ -999,6 +1010,7 @@ voip_stack:
     - script.execute: control_leds
   on_idle:
     - script.execute: {id: call_ram_log, stage: "idle"}
+    - script.execute: call_mode_end
     - script.execute: call_ram_idle_later
     - script.execute: call_ring_stop
     - lambda: id(call_peer_muted) = false;
@@ -1089,7 +1101,7 @@ media_player:
           duration: 0.0s
       - mixer_speaker.apply_ducking:
           id: call_mixing_input
-          decibel_reduction: !lambda 'return id(call_rx_muted) ? 255 : 10;'
+          decibel_reduction: 10
           duration: 0.0s
       # The TTS reply has started playing: replying LEDs now
       - if:
@@ -1117,7 +1129,7 @@ media_player:
                 duration: 1.0s
             - mixer_speaker.apply_ducking:
                 id: call_mixing_input
-                decibel_reduction: !lambda 'return id(call_rx_muted) ? 255 : 0;'
+                decibel_reduction: 0
                 duration: 1.0s
     on_mute:
       - delay: 100ms  # Debounce
@@ -1242,6 +1254,12 @@ micro_wake_word:
 
 voice_assistant:
   id: va
+  # TEST (intercom): announcements during a call are held (up to 3, the oldest dropped)
+  # and played when the call ends (set_hold_announcements, local voice_assistant copy)
+  held_announcements_max: 3
+  on_announcement_held:
+    - script.execute: call_pending_beep
+    - script.execute: control_leds
   microphone:
     microphone: afe_mic
     id: va_mic
@@ -1350,7 +1368,7 @@ voice_assistant:
         duration: 0.0s         # The duration of the transition (default is no transition)
     - mixer_speaker.apply_ducking:
         id: call_mixing_input
-        decibel_reduction: !lambda 'return id(call_rx_muted) ? 255 : 10;'  # a command in a call: the other side silent
+        decibel_reduction: 10
         duration: 0.0s
   on_listening:
     - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
@@ -1444,7 +1462,6 @@ voice_assistant:
               id: media_mixing_input
               decibel_reduction: !lambda 'return id(phone).is_active() ? 20 : 0;'  # a call keeps music down
               duration: 1.0s
-          - lambda: id(call_rx_muted) = false;  # TEST (intercom): the other side audible again
           - mixer_speaker.apply_ducking:
               id: call_mixing_input
               decibel_reduction: 0
@@ -1468,7 +1485,15 @@ voice_assistant:
           - script.execute: update_boost
           - script.execute: control_leds
   on_timer_finished:
-    - switch.turn_on: timer_ringing
+    - if:
+        condition:
+          lambda: return !id(phone).is_idle();  # TEST (intercom): in a call: rings when it ends
+        then:
+          - lambda: id(call_timer_pending) = true;
+          - script.execute: call_pending_beep
+          - script.execute: control_leds
+        else:
+          - switch.turn_on: timer_ringing
     - lambda: |
         id(next_timer).publish_state(-1);
         id(next_timer_name).publish_state("-");
@@ -1528,10 +1553,18 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: call_rx_muted  # a voice command in a call: the other side silent until it ends
+  - id: call_timer_pending  # a timer finished during a call: rings when the call ends
     type: bool
     restore_value: no
     initial_value: 'false'
+  - id: call_music_paused  # music paused for a call: resumes when the call ends
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: alloc_fail_fn  # diagnostic: function of the last failed allocation
+    type: const char *
+    restore_value: no
+    initial_value: 'nullptr'
   - id: alloc_fail_count  # diagnostic: failed heap allocations (see on_boot)
     type: uint32_t
     restore_value: no
@@ -1699,15 +1732,15 @@ script:
                 condition:
                   switch.is_off: mic_mute_switch
                 then:
-                  # TEST (intercom): calling out and not answered yet -> "Stop" cancels
+                  # TEST (intercom): call mode (ringing, calling, in a call): no voice assistant.
+                  # Calling out: any wake word ("Stop", "Okay Nabu") cancels. Ringing: "Stop"
+                  # declines, a wake word answers. In a call: a wake word hangs up.
                   - if:
                       condition:
-                        lambda: return id(phone).is_calling() && strcasecmp(wake_word.c_str(), "stop") == 0;
+                        lambda: return id(phone).is_calling();
                       then:
                         - voip_stack.stop: phone
                       else:
-                        # TEST (intercom): a call is ringing -> "Stop" declines it, a wake word
-                        # answers it (no voice assistant run)
                         - if:
                             condition:
                               lambda: return id(phone).is_ringing();
@@ -1721,62 +1754,58 @@ script:
                                   else:
                                     - voip_stack.answer_call: phone
                             else:
-                              # If a timer is ringing: Stop it, do not start the voice assistant (We can stop timer from voice!)
                               - if:
                                   condition:
-                                    switch.is_on: timer_ringing
+                                    lambda: return id(phone).is_in_call();
                                   then:
-                                    - switch.turn_off: timer_ringing
-                                  # Stop voice assistant if running
+                                    - logger.log: "Wake word in a call: hanging up"
+                                    - voip_stack.stop: phone
                                   else:
                                     - if:
                                         condition:
-                                          voice_assistant.is_running:
+                                          lambda: return id(phone).is_idle();  # connecting / ending: nothing
                                         then:
-                                          voice_assistant.stop:
-                                        # Stop any other media player announcement, or a reply still on its way
-                                        # (the run can end before its audio starts)
-                                        else:
-                                          - if:
-                                              condition:
-                                                or:
-                                                  - media_player.is_announcing: external_media_player
-                                                  - lambda: return id(reply_pending);
-                                              then:
-                                                - lambda: id(reply_pending) = false;
-                                                - media_player.stop:
-                                                    id: external_media_player
-                                                    announcement: true
-                                              # Start the voice assistant and play the wake sound, if enabled
-                                              else:
-                                                # TEST (intercom): in a call, from the wake word to the end
-                                                # of the command: the other side silent here and not hearing
-                                                # the command; no wake sound
-                                                - if:
-                                                    condition:
-                                                      lambda: return id(phone).is_in_call();
-                                                    then:
-                                                      - lambda: id(call_rx_muted) = true;
-                                                      - microphone.mute: afe_call_mic
-                                                      - mixer_speaker.apply_ducking:
-                                                          id: call_mixing_input
-                                                          decibel_reduction: 255
-                                                          duration: 0.0s
-                                                - if:
-                                                    condition:
-                                                      and:
-                                                        - switch.is_on: wake_sound
-                                                        - lambda: return !id(phone).is_in_call();
-                                                    then:
-                                                      - script.execute:
-                                                          id: play_sound
-                                                          priority: true
-                                                          sound_file: "wake_word_triggered_sound"
-                                                      - delay: 300ms
-                                                # STT gets the stream that fired
-                                                - lambda: id(va).select_stream(stream);
-                                                - voice_assistant.start:
-                                                    wake_word: !lambda return wake_word;
+                                        # If a timer is ringing: Stop it, do not start the voice assistant (We can stop timer from voice!)
+                                        - if:
+                                            condition:
+                                              switch.is_on: timer_ringing
+                                            then:
+                                              - switch.turn_off: timer_ringing
+                                            # Stop voice assistant if running
+                                            else:
+                                              - if:
+                                                  condition:
+                                                    voice_assistant.is_running:
+                                                  then:
+                                                    voice_assistant.stop:
+                                                  # Stop any other media player announcement, or a reply still on its way
+                                                  # (the run can end before its audio starts)
+                                                  else:
+                                                    - if:
+                                                        condition:
+                                                          or:
+                                                            - media_player.is_announcing: external_media_player
+                                                            - lambda: return id(reply_pending);
+                                                        then:
+                                                          - lambda: id(reply_pending) = false;
+                                                          - media_player.stop:
+                                                              id: external_media_player
+                                                              announcement: true
+                                                        # Start the voice assistant and play the wake sound, if enabled
+                                                        else:
+                                                          - if:
+                                                              condition:
+                                                                switch.is_on: wake_sound
+                                                              then:
+                                                                - script.execute:
+                                                                    id: play_sound
+                                                                    priority: true
+                                                                    sound_file: "wake_word_triggered_sound"
+                                                                - delay: 300ms
+                                                          # STT gets the stream that fired
+                                                          - lambda: id(va).select_stream(stream);
+                                                          - voice_assistant.start:
+                                                              wake_word: !lambda return wake_word;
   - id: night_mode_enter
     mode: queued
     then:
@@ -1998,11 +2027,73 @@ script:
       stage: string
     then:
       - lambda: |-
-          ESP_LOGI("intercom", "RAM %s: internal free %u, largest block %u, lowest free since boot %u",
+          ESP_LOGI("intercom", "RAM %s: internal free %u, largest block %u, lowest free since boot %u; "
+                   "DMA-capable free %u, largest block %u",
                    stage.c_str(),
                    (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                    (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                   (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                   (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                   (unsigned) heap_caps_get_free_size(MALLOC_CAP_DMA),
+                   (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+  # TEST (intercom): call mode from ringing / calling until idle: announcements held,
+  # music paused
+  - id: call_mode_start
+    then:
+      - script.stop: call_mode_end
+      - lambda: id(va).set_hold_announcements(true);
+      - if:
+          condition:
+            media_player.is_playing: external_media_player
+          then:
+            - lambda: id(call_music_paused) = true;
+            - media_player.pause: external_media_player
+  # Call mode ended: a waiting timer rings until dismissed, then the held announcements
+  # play, then the music resumes
+  - id: call_mode_end
+    mode: restart
+    then:
+      - lambda: id(va).set_hold_announcements(false);
+      - if:
+          condition:
+            lambda: return id(call_timer_pending);
+          then:
+            - lambda: id(call_timer_pending) = false;
+            - switch.turn_on: timer_ringing
+            - wait_until:
+                switch.is_off: timer_ringing
+      - if:
+          condition:
+            lambda: return id(va).held_announcements() > 0;
+          then:
+            - lambda: id(va).release_held_announcements();
+            - delay: 1s
+            - wait_until:
+                condition:
+                  and:
+                    - not:
+                        media_player.is_announcing: external_media_player
+                    - lambda: return !id(va_run_active);
+                timeout: 5min
+      - script.execute: control_leds
+      - if:
+          condition:
+            lambda: return id(call_music_paused);
+          then:
+            - lambda: id(call_music_paused) = false;
+            - media_player.play: external_media_player
+  # In call mode with something waiting: a short beep now and every 10 s
+  - id: call_pending_beep
+    mode: single
+    then:
+      - while:
+          condition:
+            lambda: return !id(phone).is_idle() && (id(call_timer_pending) || id(va).held_announcements() > 0);
+          then:
+            - script.execute:
+                id: play_sound
+                priority: true
+                sound_file: "wake_word_triggered_sound"
+            - delay: 10s
   # TEST (intercom): in a call, tell the other side (through Home Assistant, the intercom
   # automation) whether this microphone is muted
   - id: intercom_send_mute
@@ -2889,13 +2980,17 @@ interval:
       - lambda: |-
           const uint32_t n = id(alloc_fail_count);
           if (n != id(alloc_fail_logged)) {
-            ESP_LOGW("intercom", "Allocation failed (%u since boot): %u bytes, caps 0x%04x%s; "
-                     "internal free %u, largest block %u, lowest free since boot %u",
+            const char *fn = id(alloc_fail_fn);
+            ESP_LOGW("intercom", "Allocation failed (%u since boot): %u bytes, caps 0x%04x%s, in %s; "
+                     "internal free %u, largest block %u, lowest free since boot %u; DMA-capable free %u, largest block %u",
                      (unsigned) n, (unsigned) id(alloc_fail_size), (unsigned) id(alloc_fail_caps),
                      (id(alloc_fail_caps) & MALLOC_CAP_SPIRAM) ? " (PSRAM)" : " (internal)",
+                     fn != nullptr ? fn : "?",
                      (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                      (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                     (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                     (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_DMA),
+                     (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
             id(alloc_fail_logged) = n;
           }
       - lambda: |-
