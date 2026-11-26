@@ -99,8 +99,8 @@ substitutions:
   voice_assist_error_phase_id: '11' # encountered an error
 
   # ---- Test parameters: DO NOT TOUCH ------------------------------------------
-  # Fixed values of the former HA test controls of the dual wake word build
-  # (docs/dual-wake-word.md). Change only for a deliberate test.
+  # Fixed values of the former HA test controls of the dual wake word build.
+  # Change only for a deliberate test.
   afe_mode: low_cost            # AFE mode: low_cost / high_perf (only echo cancellation differs; high_perf ~15-20 points more CPU during playback, ~10 KB more internal RAM)
   afe_echo_filter_length: "4"   # echo filter length 2..4: no measurable CPU effect
   afe_vad: "false"              # Espressif AFE VAD: off (it fed only the Voice Detected sensor, now removed; unreliable here; no CPU saving either way)
