@@ -214,7 +214,8 @@ actions:
                 then:
                   - set_conversation_response: "You're talking to {{ contact }}."
                 else:
-                  - action: "esphome.{{ this_board.node }}_start_call"
+                  # the board dials once this command's reply has finished playing
+                  - action: "esphome.{{ this_board.node }}_intercom_call"
                     data:
                       dest: "{{ contact }}"
                   - set_conversation_response: "Calling {{ contact }}."

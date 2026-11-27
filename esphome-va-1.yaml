@@ -16,7 +16,7 @@ substitutions:
   friendly: "Voice Assistant 1"
   # Firmware version, shown in HA (device info) and the ESPHome dashboard.
   # Bump on every change: year.month.day.build
-  fw_version: "2026.11.26.4"
+  fw_version: "2026.11.27.4"
 
   # ---- Tunables -------------------------------------------------------------
 
@@ -58,7 +58,7 @@ substitutions:
 
   # Files in this repository (sounds/, models/, components/), pinned to a commit.
   # After changing one of them, push it and set repo_ref to that commit.
-  repo_ref: 588d1ca7ad82cd349e0a308d2f1f9cd1a3e4b4dd
+  repo_ref: 16c256aa00c7d2a65116ba9c103c45d2954e73d5
   repo_url: https://github.com/rgitha/esphome-waveshare-s3-audio-va/raw/${repo_ref}
   sounds_url: ${repo_url}/sounds
   # microWakeWord models (hey_jarvis, vad), pinned to a commit of esphome/micro-wake-word-models
@@ -178,11 +178,17 @@ esp32:
       CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64: "y"
       # Bounded Wi-Fi buffering (intercom board profile): media/TTS ingress sees
       # backpressure before the audio sink saturates.
-      CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM: "10"
+      # TEST (intercom): less DMA-capable internal RAM for Wi-Fi (a call ran it low):
+      # static RX buffers 10 -> 6 (~1.6 KB each, fixed at Wi-Fi start: ~6.4 KB more
+      # free), the RX aggregation window to match (16 -> 6, ESP-IDF: buffers >= window;
+      # lower peak download speed, e.g. OTA), and the send queue capped at 8 (32: in a
+      # Wi-Fi stall up to ~26 KB of call packets could wait; now ~6.6 KB, 160 ms of call
+      # audio; beyond that a packet is dropped instead of draining DMA-capable RAM)
+      CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM: "6"
       CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM: "32"
-      CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM: "32"
+      CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM: "8"
       CONFIG_ESP_WIFI_TX_BA_WIN: "16"
-      CONFIG_ESP_WIFI_RX_BA_WIN: "16"
+      CONFIG_ESP_WIFI_RX_BA_WIN: "6"
       CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
       CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
       CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
@@ -234,6 +240,15 @@ api:
   actions:
     # TEST (intercom): the other side of the call muted or unmuted its microphone (sent
     # by the intercom automation): LEDs show it
+    # TEST (intercom): call a contact once the current voice command (its spoken reply
+    # included) has finished: the reply's download and playback do not overlap the
+    # call setup (sent by the intercom automation)
+    - action: intercom_call
+      variables:
+        dest: string
+      then:
+        - lambda: id(call_dial_dest) = dest;
+        - script.execute: call_dial_pending
     - action: intercom_peer_muted
       variables:
         muted: bool
@@ -994,6 +1009,7 @@ voip_stack:
         id(call_peer) = peer;
         id(call_peer_muted) = false;
     - script.execute: intercom_send_mute  # the other side learns if this side is muted
+    - script.execute: {id: call_wake_words, in_call: true}
     - script.execute: {id: call_ram_log, stage: "connected"}
     - script.execute: call_ring_stop
     - script.execute: call_connect_flash
@@ -1009,6 +1025,7 @@ voip_stack:
     - script.execute: call_ring_stop
     - script.execute: control_leds
   on_idle:
+    - script.execute: {id: call_wake_words, in_call: false}
     - script.execute: {id: call_ram_log, stage: "idle"}
     - script.execute: call_mode_end
     - script.execute: call_ram_idle_later
@@ -1176,6 +1193,11 @@ micro_wake_word:
         id: stop
         internal: true
         probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+      # TEST (intercom): "hangup nabu" ends a connected call; the only wake word on during
+      # it (models/NOTICE.md). Last in the list of mww and mww_b (the 1 s sync matches by position).
+      - model: ${repo_url}/models/hangup_nabu.json
+        id: hangup
+        internal: true
     vad:
       model: ${mww_models_url}/vad.json
       probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
@@ -1209,6 +1231,11 @@ micro_wake_word:
         id: stop_b
         internal: true
         probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+      # TEST (intercom): "hangup nabu" ends a connected call; the only wake word on during
+      # it (models/NOTICE.md). Last in the list of mww and mww_b (the 1 s sync matches by position).
+      - model: ${repo_url}/models/hangup_nabu.json
+        id: hangup_b
+        internal: true
     vad:
       model: ${mww_models_url}/vad.json
       probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
@@ -1243,6 +1270,8 @@ micro_wake_word:
         id: stop_c
         internal: true
         probability_cutoff: 0.75 # model default 0.50 false-triggered on residual TTS echo
+      # (no "hangup nabu" here: this instance does not run during a call; it is last in
+      # the other two lists, so the 1 s sync is unaffected)
     vad:
       model: ${mww_models_url}/vad.json
       probability_cutoff: 0.1 # was 0.2: rejected a real "Okay Nabu" said over music
@@ -1546,6 +1575,9 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  - id: call_dial_dest  # contact to call once the voice command has finished
+    type: std::string
+    restore_value: no
   - id: call_peer  # the other side of the connected call (its name as voip_stack reports it)
     type: std::string
     restore_value: no
@@ -1733,13 +1765,17 @@ script:
                   switch.is_off: mic_mute_switch
                 then:
                   # TEST (intercom): call mode (ringing, calling, in a call): no voice assistant.
-                  # Calling out: any wake word ("Stop", "Okay Nabu") cancels. Ringing: "Stop"
+                  # Calling out: "Stop" cancels (other wake words ignored). Ringing: "Stop"
                   # declines, a wake word answers. In a call: a wake word hangs up.
                   - if:
                       condition:
                         lambda: return id(phone).is_calling();
                       then:
-                        - voip_stack.stop: phone
+                        - if:
+                            condition:
+                              lambda: return strcasecmp(wake_word.c_str(), "stop") == 0;
+                            then:
+                              - voip_stack.stop: phone
                       else:
                         - if:
                             condition:
@@ -1758,8 +1794,13 @@ script:
                                   condition:
                                     lambda: return id(phone).is_in_call();
                                   then:
-                                    - logger.log: "Wake word in a call: hanging up"
-                                    - voip_stack.stop: phone
+                                    # only "hangup nabu" runs in a connected call
+                                    - if:
+                                        condition:
+                                          lambda: return strcasecmp(wake_word.c_str(), "hangup nabu") == 0;
+                                        then:
+                                          - logger.log: "Hangup Nabu: hanging up"
+                                          - voip_stack.stop: phone
                                   else:
                                     - if:
                                         condition:
@@ -2047,6 +2088,14 @@ script:
           then:
             - lambda: id(call_music_paused) = true;
             - media_player.pause: external_media_player
+      # Release the announcement playback pipeline before the call: after a reply that
+      # played to the end, its reader task (stack in internal RAM, ~7.5 KB with its
+      # control block and HTTP state) and 250 KB ring buffer stay allocated until the
+      # next stop or play. A stop frees them, as the next reply's play would anyway.
+      # Before the ring starts.
+      - media_player.stop:
+          id: external_media_player
+          announcement: true
   # Call mode ended: a waiting timer rings until dismissed, then the held announcements
   # play, then the music resumes
   - id: call_mode_end
@@ -2081,6 +2130,44 @@ script:
           then:
             - lambda: id(call_music_paused) = false;
             - media_player.play: external_media_player
+  # Dial call_dial_dest once the voice assistant run (reply included) has finished
+  - id: call_dial_pending
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            lambda: return !id(va_run_active);
+          timeout: 20s
+      - delay: 300ms
+      - lambda: |-
+          const std::string dest = id(call_dial_dest);
+          id(call_dial_dest).clear();
+          if (dest.empty())
+            return;
+          if (!id(phone).is_idle()) {
+            ESP_LOGW("intercom", "Not calling %s: a call is already active", dest.c_str());
+            return;
+          }
+          ESP_LOGI("intercom", "Calling %s (after the voice command)", dest.c_str());
+          id(phone).call(dest);
+  # Connected call: only "hangup nabu" listens. Home Assistant's wake words are suspended
+  # (not disabled: nothing is saved to flash, so after a restart mid-call they are back)
+  - id: call_wake_words
+    parameters:
+      in_call: bool
+    then:
+      - lambda: |-
+          for (auto *m : {id(mww), id(mww_b), id(mww_c)})
+            for (auto *w : m->get_wake_words())
+              if (!w->get_internal_only())
+                w->set_suspended(in_call);
+          if (in_call) {
+            id(hangup)->enable();
+            id(hangup_b)->enable();
+          } else {
+            id(hangup)->disable();
+            id(hangup_b)->disable();
+          }
   # In call mode with something waiting: a short beep now and every 10 s
   - id: call_pending_beep
     mode: single
@@ -2740,6 +2827,11 @@ number:
     mode: slider
 
 sensor:
+  # Wi-Fi signal strength (RSSI) of the access point the board is connected to
+  - platform: wifi_signal
+    name: "Wi-Fi signal"
+    entity_category: diagnostic
+    update_interval: 60s
   # CPU load per core over the last 60 s (interval at the end)
   - platform: template
     id: cpu_load_core0

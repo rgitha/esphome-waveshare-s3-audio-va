@@ -2,8 +2,37 @@
 
 Firmware versions (`fw_version`, year.month.day.build), newest first.
 
+## 2026.11.27
+
+- **.4** (TEST, branch intercom) Wi-Fi send queue capped at 8 buffers (16): in a Wi-Fi
+  stall (weak signal, roam scans) the waiting call packets can take at most ~6.6 KB of
+  DMA-capable RAM; beyond that a packet is dropped.
+- **.3** (TEST, branch intercom) Diagnostic "Wi-Fi signal" (dBm, every 60 s). "hangup
+  nabu" only on the two separated-stream instances (the third does not run in a call),
+  saving its copy in flash and PSRAM and part of the internal RAM.
+- **.2** (TEST, branch intercom) In a connected call only "hangup nabu" listens, and it
+  hangs up; Home Assistant's wake words ("Okay Nabu", ...) are suspended for the call
+  (nothing saved to flash, so a restart mid-call brings them back). Models "hangup nabu",
+  "nabu hangup", "ok nabu hangup" from Tater-Wake-Words (MIT) in models/.
+- **.1** (TEST, branch intercom) The release of the announcement pipeline at call start
+  (from 2026.11.26.8) stays; its two test RAM log lines are removed.
+
 ## 2026.11.26
 
+- **.8** (TEST, branch intercom) At the start of a call the announcement playback
+  pipeline is released (a media player stop), which otherwise stays allocated after a
+  spoken reply (about 7.5 KB internal RAM, 260 KB PSRAM). RAM logged before and 1 s
+  after.
+- **.7** (TEST, branch intercom) A call by voice is dialled after the spoken reply
+  ("Calling VA2.") has finished, instead of during it: the reply's download and
+  playback no longer overlap the call setup, which ran the RAM low enough to lose a SIP
+  message. Needs the updated intercom automation (action intercom_call).
+- **.6** (TEST, branch intercom) Wi-Fi uses less DMA-capable internal RAM, which a call
+  ran low: static receive buffers 10 → 6 (about 6.4 KB more free), receive aggregation
+  window 16 → 6 to match, send queue capped at 16 buffers (32). Peak download speed is
+  lower (OTA a little slower).
+- **.5** (TEST, branch intercom) Calling out, only "Stop" cancels the call; "Okay
+  Nabu" is ignored until the call connects (then it hangs up).
 - **.4** (TEST, branch intercom) Call mode, from ringing or calling until the call
   is over: no voice assistant. A wake word answers a ringing call, cancels an outgoing
   one and hangs up a connected one ("Stop" still declines or cancels). Announcements
