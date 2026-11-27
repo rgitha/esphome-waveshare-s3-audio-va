@@ -56,8 +56,14 @@ class StreamingModel {
   /// @brief Disable the model. The next performing_streaming_inference call will unload it.
   virtual void disable() { this->enabled_ = false; }
 
-  /// @brief Return true if the model is enabled.
+  /// @brief Return true if the model is enabled (the saved setting; a suspension does not change it).
   bool is_enabled() const { return this->enabled_; }
+
+  /// @brief Local addition: suspend the model for a while (e.g. an intercom call). A suspended model is
+  /// unloaded and detects nothing, but its enabled setting is untouched and nothing is saved to flash:
+  /// after a restart it is not suspended.
+  void set_suspended(bool suspended) { this->suspended_ = suspended; }
+  bool is_suspended() const { return this->suspended_; }
 
   /// @brief Return true if the model has usable data. A model without it can never be loaded or run.
   bool has_model_data() const { return this->model_start_ != nullptr; }
@@ -84,6 +90,8 @@ class StreamingModel {
 
   bool loaded_{false};
   bool enabled_{true};
+  bool suspended_{false};  // local addition, never saved
+  bool is_active_() const { return this->enabled_ && !this->suspended_; }
   bool tensor_arena_size_probed_{false};
   bool unprocessed_probability_status_{false};
   uint8_t current_stride_step_{0};

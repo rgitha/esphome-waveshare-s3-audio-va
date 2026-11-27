@@ -212,15 +212,15 @@ bool StreamingModel::perform_streaming_inference(const int8_t features[PREPROCES
     return true;
   }
 
-  if (this->enabled_ && !this->loaded_) {
-    // Model is enabled but isn't loaded
+  if (this->is_active_() && !this->loaded_) {
+    // Model is enabled (and not suspended) but isn't loaded
     if (!this->load_model_()) {
       return false;
     }
   }
 
-  if (!this->enabled_ && this->loaded_) {
-    // Model is disabled but still loaded
+  if (!this->is_active_() && this->loaded_) {
+    // Model is disabled or suspended but still loaded
     this->unload_model();
     return true;
   }
@@ -352,7 +352,7 @@ DetectionEvent WakeWordModel::determine_detected() {
   detection_event.max_probability = 0;
   detection_event.average_probability = 0;
 
-  if ((this->ignore_windows_ < 0) || !this->enabled_) {
+  if ((this->ignore_windows_ < 0) || !this->is_active_()) {
     detection_event.detected = false;
     return detection_event;
   }
